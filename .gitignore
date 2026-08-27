@@ -17,6 +17,10 @@
 2048.o
 2048.obj
 2048.gcda
+/solver/solver2048
+/solver/solver_tests
+/solver/*.sgf
+/solver/*.sgf.tmp
 
 # Model files
 *.w

@@ -1,0 +1,149 @@
+#pragma once
+
+#include "config.h"
+#include "game_api.h"
+
+#include <cstddef>
+#include <cstdint>
+#include <functional>
+#include <memory>
+#include <optional>
+#include <string>
+#include <unordered_map>
+#include <vector>
+
+namespace solver2048 {
+
+enum class Outcome {
+    Win,
+    Loss,
+    Unknown,
+};
+
+enum class Phase {
+    Player,
+    Environment,
+};
+
+enum class TerminalReason {
+    None,
+    WinningTile,
+    NoLegalMove,
+    NodeLimit,
+    TranspositionTable,
+};
+
+struct SearchAction {
+    enum class Kind {
+        Slide,
+        Placement,
+    };
+
+    Kind kind = Kind::Slide;
+    Direction direction = Direction::Up;
+    int position = -1;
+    unsigned tile = 0;
+
+    static SearchAction slide(Direction direction);
+    static SearchAction placement(int position, unsigned tile);
+
+    int sgfId() const;
+    char sgfPlayer() const;
+    std::string name() const;
+    std::string summaryToken() const;
+};
+
+struct TraceNode {
+    std::uint64_t trace_id = 0;
+    Phase phase = Phase::Player;
+    Outcome outcome = Outcome::Unknown;
+    TerminalReason terminal_reason = TerminalReason::None;
+    bool expanded = false;
+    bool tt_hit = false;
+    std::size_t dfs_order = 0;
+    std::size_t children_total = 0;
+    std::optional<std::uint64_t> tt_source_trace_id;
+    std::optional<SearchAction> incoming_action;
+    std::optional<double> value;
+    std::optional<SearchAction> selected_action;
+    std::optional<double> selected_value;
+    std::vector<std::unique_ptr<TraceNode>> children;
+    std::vector<SearchAction> skipped_actions;
+};
+
+struct SearchStatistics {
+    std::uint64_t player_nodes = 0;
+    std::uint64_t environment_nodes = 0;
+    std::uint64_t player_actions = 0;
+    std::uint64_t placement_actions = 0;
+    std::uint64_t node_limit_cutoffs = 0;
+    std::uint64_t player_tt_hits = 0;
+    std::uint64_t environment_tt_hits = 0;
+    std::uint64_t player_tt_stores = 0;
+    std::uint64_t environment_tt_stores = 0;
+
+    std::uint64_t combinedNodes() const { return player_nodes + environment_nodes; }
+    std::uint64_t ttHits() const { return player_tt_hits + environment_tt_hits; }
+    std::uint64_t ttStores() const { return player_tt_stores + environment_tt_stores; }
+};
+
+struct SolverOptions {
+    unsigned winning_tile = config::kDefaultWinningTile;
+    std::uint64_t node_limit = config::kDefaultNodeLimit;
+    std::uint64_t progress_interval = config::kDefaultProgressInterval;
+    bool use_transposition_table = config::kDefaultUseTranspositionTable;
+};
+
+struct SearchResult {
+    Outcome outcome = Outcome::Unknown;
+    SearchStatistics statistics;
+    std::unique_ptr<TraceNode> root;
+    std::optional<Direction> root_action;
+    std::optional<double> root_value;
+};
+
+class Solver {
+public:
+    using ProgressCallback = std::function<void(const SearchStatistics&)>;
+
+    Solver(const Game& game, SolverOptions options, ProgressCallback progress = {});
+    SearchResult solve();
+
+private:
+    struct OrderedSlide {
+        SlideResult slide;
+        double value = 0;
+    };
+
+    struct TranspositionEntry {
+        Outcome outcome = Outcome::Unknown;
+        std::uint64_t source_trace_id = 0;
+        std::size_t children_total = 0;
+        std::optional<SearchAction> selected_action;
+        std::optional<double> selected_value;
+    };
+
+    Outcome solvePlayer(Board board, TraceNode& trace);
+    Outcome solveEnvironment(Board afterstate, TraceNode& trace);
+    void assignTraceId(TraceNode& trace);
+    bool lookupPlayerTransposition(Board board, TraceNode& trace);
+    bool lookupEnvironmentTransposition(Board afterstate, TraceNode& trace);
+    void storePlayerTransposition(Board board, const TraceNode& trace);
+    void storeEnvironmentTransposition(Board afterstate, const TraceNode& trace);
+    bool atNodeLimit() const;
+    void expandedNode();
+
+    const Game& game_;
+    SolverOptions options_;
+    ProgressCallback progress_;
+    SearchStatistics statistics_;
+    std::uint64_t next_trace_id_ = 0;
+    std::unordered_map<std::uint64_t, TranspositionEntry> player_tt_;
+    std::unordered_map<std::uint64_t, TranspositionEntry> environment_tt_;
+};
+
+const char* outcomeName(Outcome outcome);
+const char* phaseName(Phase phase);
+const char* terminalReasonName(TerminalReason reason);
+
+} // namespace solver2048

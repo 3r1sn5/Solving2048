@@ -36,6 +36,7 @@
 #include "moporgic/math.h"
 #include "moporgic/shm.h"
 #include "board.h"
+#include "2048_api.h"
 
 namespace moporgic {
 
@@ -2623,6 +2624,53 @@ utils::options parse(int argc, const char* argv[]) {
 	return opts;
 }
 
+namespace solver_api {
+
+void initializeNetwork(const std::string& network, const std::string& model_path)
+{
+	if (network != "4x6patt")
+		throw std::invalid_argument("the first solver API supports only the 4x6patt network");
+	static bool initialized = false;
+	if (initialized)
+		throw std::logic_error("the process-wide N-tuple network is already initialized");
+
+	utils::options options;
+	options["make"] = network;
+	options["load"] = model_path;
+	utils::config_weight(options["alpha"]);
+	utils::load_network(options["load"]);
+	if (weight::wghts().empty())
+		throw std::runtime_error("the N-tuple model did not contain any weights: " + model_path);
+	utils::make_network(options["make"]);
+	if (feature::feats().empty())
+		throw std::runtime_error("failed to bind N-tuple features for: " + network);
+	initialized = true;
+}
+
+int slide(RawBoard raw, unsigned opcode, RawBoard& afterstate)
+{
+	if (opcode >= 4) return -1;
+	board moved(raw);
+	int reward = moved.move(opcode);
+	afterstate = static_cast<u64>(moved);
+	return reward;
+}
+
+double evaluateAfterstate(RawBoard raw)
+{
+	using evaluator = method::isomorphic<weight::structure>::idx4x6patt;
+	return evaluator::estimate(board(raw), feature::feats());
+}
+
+unsigned tileExponentAt(RawBoard raw, unsigned position)
+{
+	if (position >= 16) throw std::out_of_range("2048 board position must be in [0, 15]");
+	return board(raw).at(position);
+}
+
+} // namespace solver_api
+
+#ifndef MOPORGIC_NO_MAIN
 int main(int argc, const char* argv[]) {
 	utils::options opts = parse(argc, argv);
 	utils::handle_routine(opts["run"]);
@@ -2661,9 +2709,12 @@ int main(int argc, const char* argv[]) {
 
 	return 0;
 }
+#endif
 
 } // namespace moporgic
 
+#ifndef MOPORGIC_NO_MAIN
 int main(int argc, const char* argv[]) {
 	return moporgic::main(argc, argv);
 }
+#endif

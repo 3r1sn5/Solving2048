@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>2048 Solver Tree Viewer</title>
+  <link rel="stylesheet" href="viewer.css">
+</head>
+<body>
+  <header class="topbar">
+    <div>
+      <h1>2048 Solver Tree Viewer</h1>
+      <p>載入 solver 產生的 SGF，檢視 AND/OR DFS tree。</p>
+    </div>
+    <div class="file-controls">
+      <label class="file-button" for="sgf-file">選擇 SGF</label>
+      <input id="sgf-file" type="file" accept=".sgf,text/plain">
+      <span id="file-status" class="muted">尚未載入檔案</span>
+    </div>
+  </header>
+
+  <main class="layout">
+    <section class="panel tree-panel" aria-label="Search tree">
+      <div class="panel-header">
+        <div>
+          <h2>Search tree</h2>
+          <span id="tree-summary" class="muted">0 nodes</span>
+        </div>
+        <div class="tree-header-controls">
+          <span class="tt-legend"><span aria-hidden="true"></span>TT hit</span>
+          <label class="toggle-control">
+            <input id="show-skipped" type="checkbox" checked>
+            顯示 Skipped
+          </label>
+        </div>
+      </div>
+
+      <div class="tree-toolbar">
+        <div class="toolbar-group" aria-label="Tree navigation">
+          <button id="go-root" type="button">Root</button>
+          <button id="go-parent" type="button">Parent</button>
+          <button id="go-child" type="button">First child</button>
+          <button id="go-prev" type="button">Prev sibling</button>
+          <button id="go-next" type="button">Next sibling</button>
+          <button id="expand-all" type="button">展開全部</button>
+        </div>
+        <div class="toolbar-group graph-controls" aria-label="Graph view controls">
+          <button id="zoom-out" type="button" title="Zoom out">−</button>
+          <span id="zoom-label" class="zoom-label">100%</span>
+          <button id="zoom-in" type="button" title="Zoom in">＋</button>
+          <button id="fit-graph" type="button">Fit</button>
+          <button id="reset-view" type="button">Reset</button>
+        </div>
+      </div>
+
+      <p class="keyboard-help muted">拖曳平移、滾輪縮放；鍵盤：↑ parent、↓ child、←/→ sibling、Home root</p>
+      <div id="tree" class="tree" aria-label="2048 DFS node-link graph">
+        <div class="empty-state">請先載入 SGF</div>
+      </div>
+      <div id="tree-work-status" class="tree-work-status" role="status" aria-live="polite" hidden>
+        <span class="work-spinner" aria-hidden="true"></span>
+        <span id="tree-work-message">處理中…</span>
+      </div>
+    </section>
+
+    <section class="panel inspector-panel" aria-label="Selected node">
+      <div class="panel-header">
+        <div>
+          <h2>Selected node</h2>
+          <span id="selected-label" class="muted">—</span>
+        </div>
+        <div class="selected-badges">
+          <div id="selected-status" class="status-badge unknown">UNKNOWN</div>
+          <button id="tt-reference" class="tt-reference" type="button" hidden>TT HIT</button>
+        </div>
+      </div>
+
+      <div class="inspector-grid">
+        <div class="board-column">
+          <div id="board" class="board" aria-label="2048 board"></div>
+          <div id="board-warning" class="board-warning" hidden></div>
+          <nav id="path" class="path" aria-label="Action path">root</nav>
+        </div>
+
+        <div class="details-column">
+          <dl id="node-metrics" class="metrics"></dl>
+
+          <div class="section-heading">
+            <h3>Children</h3>
+            <button id="toggle-current" type="button">展開目前節點</button>
+          </div>
+          <div id="children" class="children"></div>
+
+          <h3>SGF comment</h3>
+          <pre id="comment" class="comment">(no comment)</pre>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script src="viewer.js"></script>
+</body>
+</html>

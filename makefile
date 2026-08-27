@@ -8,6 +8,10 @@ INSTS ?= abm bmi bmi2 avx avx2
 FLAGS ?= -Wall -fmessage-length=0
 SOURCE ?= 2048.cpp
 OUTPUT ?= $(basename $(word 1, $(SOURCE)))
+SOLVER_OUTPUT ?= solver/solver2048
+SOLVER_TEST_OUTPUT ?= solver/solver_tests
+SOLVER_SOURCES := solver/main.cpp solver/game_api.cpp solver/search.cpp solver/sgf.cpp 2048.cpp
+SOLVER_TEST_SOURCES := solver/tests.cpp solver/game_api.cpp solver/search.cpp solver/sgf.cpp 2048.cpp
 # other make options
 TARGET ?= default
 SCRIPT ?= make-profile.sh
@@ -50,6 +54,15 @@ endif
 default: # build with default
 	$(CXX) -std=$(STD) -O$(OLEVEL) $(addprefix -m, $(ARCH) $(INSTS)) -pthread $(FLAGS) -o $(OUTPUT) $(SOURCE)
 
+solver: # build the fixed-opening AND-OR solver
+	$(CXX) -std=$(STD) -O$(OLEVEL) $(addprefix -m, $(ARCH) $(INSTS)) -pthread $(FLAGS) \
+		-DMOPORGIC_NO_MAIN -Wno-unused-parameter -Wno-deprecated-copy -I. -o $(SOLVER_OUTPUT) $(SOLVER_SOURCES)
+
+solver-test: # build and run the solver tests
+	$(CXX) -std=$(STD) -O2 $(addprefix -m, $(ARCH) $(INSTS)) -pthread $(FLAGS) \
+		-DMOPORGIC_NO_MAIN -Wno-unused-parameter -Wno-deprecated-copy -I. -o $(SOLVER_TEST_OUTPUT) $(SOLVER_TEST_SOURCES)
+	./$(SOLVER_TEST_OUTPUT)
+
 static: # build with static executable
 	@+$(MAKE) default ARCH="tune=generic" FLAGS="$(FLAGS) -static"
 
@@ -77,3 +90,8 @@ dump: # build and dump the disassembly
 clean: # cleanup
 	$(eval FILES ?= $(shell file -0 $(wildcard $(OUTPUT:%$(SUFFIX)=%)* .) | grep -Ea ": +(ELF|PE32|GCC gcda)" | cut -d '' -f1))
 	$(if $(FILES), $(RM) $(FILES))
+
+solver-clean:
+	$(RM) $(SOLVER_OUTPUT) $(SOLVER_TEST_OUTPUT)
+
+.PHONY: solver solver-test solver-clean
