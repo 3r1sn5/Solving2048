@@ -74,9 +74,11 @@ struct TraceNode {
     bool tt_symmetry_hit = false;
     std::optional<std::uint8_t> tt_transform;
     std::optional<SearchAction> incoming_action;
-    std::optional<double> value;
+    std::optional<int> reward;
+    std::optional<double> afterstate_value;
+    std::optional<double> action_value;
     std::optional<SearchAction> selected_action;
-    std::optional<double> selected_value;
+    std::optional<double> selected_action_value;
     std::vector<std::unique_ptr<TraceNode>> children;
     std::vector<SearchAction> skipped_actions;
 };
@@ -119,7 +121,7 @@ struct SearchResult {
     SearchStatistics statistics;
     std::unique_ptr<TraceNode> root;
     std::optional<Direction> root_action;
-    std::optional<double> root_value;
+    std::optional<double> root_action_value;
 };
 
 class Solver {
@@ -132,7 +134,8 @@ public:
 private:
     struct OrderedSlide {
         SlideResult slide;
-        double value = 0;
+        double afterstate_value = 0;
+        double action_value = 0;
     };
 
     struct TranspositionEntry {
@@ -140,7 +143,7 @@ private:
         std::uint64_t source_trace_id = 0;
         std::size_t children_total = 0;
         std::optional<SearchAction> selected_action;
-        std::optional<double> selected_value;
+        std::optional<double> selected_action_value;
         std::uint8_t source_transform = 0;
     };
 
@@ -153,7 +156,7 @@ private:
     void storeEnvironmentTransposition(Board afterstate, const TraceNode& trace);
     CanonicalBoard transpositionKey(Board board) const;
     static SearchAction transformAction(const SearchAction& action, std::uint8_t transform);
-    double selectedSlideValue(Board board, Direction direction) const;
+    double selectedSlideActionValue(Board board, Direction direction) const;
     bool atNodeLimit() const;
     void expandedNode();
 

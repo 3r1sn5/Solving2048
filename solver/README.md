@@ -93,6 +93,18 @@ exhausted. A TT hit does not consume the expanded-node budget or count as a
 node-limit cutoff. Both tables are cleared at the beginning of every `solve()`;
 they are neither persisted to disk nor shared across solver runs.
 
+At each Player node, legal slides are searched in descending action value:
+
+```text
+action value = immediate slide reward + V(afterstate)
+```
+
+The N-tuple evaluator returns only `V(afterstate)`; the solver adds the reward
+reported by the shared slide API, matching the original 2048 agent's action
+evaluation. Direction opcode (`up`, `right`, `down`, `left`) is the stable
+tie-break. This heuristic changes DFS order only; Win/Loss still comes solely
+from the complete AND-OR proof.
+
 With `--tt-symmetry`, both store and lookup compute the minimum raw board among
 all eight D4 versions and perform one hash-table operation using that canonical
 key. Actions are stored in canonical orientation and mapped back on a hit, so

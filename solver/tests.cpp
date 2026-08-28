@@ -189,9 +189,9 @@ void testPlayerOrUnknownWinAndSkipped()
 {
     FakeGame game;
     game.slides[1] = {
-        slide(Direction::Up, 10, 1000),
-        slide(Direction::Right, 11, 0),
-        slide(Direction::Down, 12, 999999),
+        slide(Direction::Up, 10),
+        slide(Direction::Right, 11),
+        slide(Direction::Down, 12),
     };
     game.values = {{10, 30.0}, {11, 20.0}, {12, 10.0}};
     game.winning_states.insert(11);
@@ -202,7 +202,8 @@ void testPlayerOrUnknownWinAndSkipped()
     check(result.root_action == Direction::Right, "Player OR selected the wrong winning action");
     check(result.root->solved_by == SolvedBy::Backpropagation,
           "Player OR result must be marked as solved by BACKPROPAGATION");
-    checkNear(*result.root_value, 20.0, 0.0, "selected value must be V(afterstate)");
+    checkNear(*result.root_action_value, 20.0, 0.0,
+              "selected action value must be reward + V(afterstate)");
     check(result.statistics.player_nodes == 1, "node-limit OR test player node count mismatch");
     check(result.statistics.environment_nodes == 0, "node-limit OR test environment node count mismatch");
     check(result.statistics.player_actions == 3, "all Player actions must be generated before DFS");
@@ -318,16 +319,17 @@ void testEnvironmentUnknownIsNotShortCircuit()
     check(environment.skipped_actions.empty(), "Unknown must not be recorded as skipped");
 }
 
-void testValueOrderingAndDirectionTieBreak()
+void testActionValueOrderingAndDirectionTieBreak()
 {
     FakeGame game;
-    // Deliberately return directions out of opcode order. Equal values must still
-    // use Up, Right, Down, Left as the deterministic tie-break.
+    // Deliberately return directions out of opcode order. Right wins because its
+    // immediate reward raises Q above V(afterstate); equal Q values then use
+    // Up, Right, Down, Left as the deterministic tie-break.
     game.slides[1] = {
-        slide(Direction::Left, 10, 1000000),
-        slide(Direction::Up, 11, 999999),
-        slide(Direction::Right, 12, -1000000),
-        slide(Direction::Down, 13, 5000000),
+        slide(Direction::Left, 10, 0),
+        slide(Direction::Up, 11, 40),
+        slide(Direction::Right, 12, 4),
+        slide(Direction::Down, 13, 20),
     };
     game.values = {{10, 50.0}, {11, 10.0}, {12, 50.0}, {13, 30.0}};
     game.placements[10] = {placement(0, 2, 20)};
@@ -341,16 +343,20 @@ void testValueOrderingAndDirectionTieBreak()
     check(result.root->children.size() == 4, "ordering graph did not visit every Player action");
     const std::array<Direction, 4> expected = {
         Direction::Right,
-        Direction::Left,
-        Direction::Down,
         Direction::Up,
+        Direction::Down,
+        Direction::Left,
     };
     for (std::size_t index = 0; index < expected.size(); ++index) {
         check(incomingDirection(*result.root->children[index]) == expected[index],
-              "Player DFS order must be descending V(afterstate), then direction opcode");
+              "Player DFS order must be descending reward + V(afterstate), then direction opcode");
     }
-    checkNear(*result.root->children[0]->value, 50.0, 0.0, "first action value mismatch");
-    checkNear(*result.root->children[2]->value, 30.0, 0.0, "third action value mismatch");
+    const TraceNode& first = *result.root->children[0];
+    check(first.reward && *first.reward == 4, "first action reward mismatch");
+    checkNear(*first.afterstate_value, 50.0, 0.0, "first afterstate value mismatch");
+    checkNear(*first.action_value, 54.0, 0.0, "first reward + V action value mismatch");
+    checkNear(*result.root->children[1]->action_value, 50.0, 0.0,
+              "second tied action value mismatch");
 }
 
 struct TemporaryConfigFile {
@@ -510,9 +516,9 @@ void testPlayerSymmetryTranspositionHitAndWitnessMapping()
         placement(0, 2, source.raw),
         placement(0, 4, rotated.raw),
     };
-    game.slides[source.raw] = {slide(Direction::Up, source_win.raw)};
+    game.slides[source.raw] = {slide(Direction::Up, source_win.raw, 4)};
     game.slides[rotated.raw] = {
-        slide(solver2048::transformDirection(Direction::Up, 1), rotated_win.raw),
+        slide(solver2048::transformDirection(Direction::Up, 1), rotated_win.raw, 4),
     };
     game.values[source_win.raw] = 5.0;
     game.values[rotated_win.raw] = 7.0;
@@ -540,8 +546,8 @@ void testPlayerSymmetryTranspositionHitAndWitnessMapping()
               hit.selected_action->direction ==
                   solver2048::transformDirection(Direction::Up, 1),
           "canonical Player witness must map back to the rotated direction");
-    check(hit.selected_value && *hit.selected_value == 7.0,
-          "symmetry Player hit must recompute V for its mapped current-orientation witness");
+    check(hit.selected_action_value && *hit.selected_action_value == 11.0,
+          "symmetry Player hit must recompute reward + V for its mapped witness");
     check(hit.tt_source_trace_id && *hit.tt_source_trace_id == source_trace.trace_id,
           "symmetry Player hit must reference the original proof trace");
 }
@@ -679,7 +685,7 @@ void testPlayerTranspositionHit()
     check(hit.selected_action && hit.selected_action->kind == SearchAction::Kind::Slide &&
               hit.selected_action->direction == Direction::Right,
           "Player TT hit must restore the cached winning action");
-    check(hit.selected_value && *hit.selected_value == 5.0,
+    check(hit.selected_action_value && *hit.selected_action_value == 5.0,
           "Player TT hit must restore the cached action value");
     check(hit.children.empty(), "TT hit trace must not duplicate the cached subtree");
     check(source.trace_id < hit.trace_id,
@@ -713,7 +719,8 @@ void testEnvironmentTranspositionHitAndOutcomeConsistency()
           "TT on/off must produce the same root outcome");
     check(baseline.root_action == Direction::Down && cached.root_action == baseline.root_action,
           "TT on/off must select the same proven winning root action");
-    check(baseline.root_value && cached.root_value && *baseline.root_value == *cached.root_value,
+    check(baseline.root_action_value && cached.root_action_value &&
+              *baseline.root_action_value == *cached.root_action_value,
           "TT on/off must preserve the selected root action value");
     check(baseline.statistics.environment_nodes == 2 &&
               baseline_game.placement_calls[10] == 2,
@@ -923,17 +930,17 @@ void testRealGameApiAndThreeNodeSearch()
           "complete target-8 TT search must prove a guaranteed Win");
     check(tt_result.root_action == Direction::Down,
           "complete target-8 TT search must select Down at the fixed opening");
-    check(tt_result.statistics.player_nodes == 159766,
+    check(tt_result.statistics.player_nodes == 159652,
           "complete target-8 TT search player node count mismatch");
-    check(tt_result.statistics.environment_nodes == 13775,
+    check(tt_result.statistics.environment_nodes == 13759,
           "complete target-8 TT search Environment node count mismatch");
-    check(tt_result.statistics.player_tt_stores == 159766,
+    check(tt_result.statistics.player_tt_stores == 159652,
           "complete target-8 TT search Player entry count mismatch");
-    check(tt_result.statistics.environment_tt_stores == 13775,
+    check(tt_result.statistics.environment_tt_stores == 13759,
           "complete target-8 TT search Environment entry count mismatch");
-    check(tt_result.statistics.player_tt_hits == 26741,
+    check(tt_result.statistics.player_tt_hits == 26671,
           "complete target-8 TT search Player hit count mismatch");
-    check(tt_result.statistics.environment_tt_hits == 33200,
+    check(tt_result.statistics.environment_tt_hits == 32990,
           "complete target-8 TT search Environment hit count mismatch");
     check(tt_result.statistics.node_limit_cutoffs == 0,
           "unlimited target-8 TT search must not report a node-limit cutoff");
@@ -942,19 +949,19 @@ void testRealGameApiAndThreeNodeSearch()
     SearchResult symmetry_result = Solver(game, SolverOptions{8, 0, 0, true, true}).solve();
     check(symmetry_result.outcome == tt_result.outcome &&
               symmetry_result.root_action == tt_result.root_action &&
-              symmetry_result.root_value == tt_result.root_value,
+              symmetry_result.root_action_value == tt_result.root_action_value,
           "target-8 symmetry TT must preserve the exact-TT root proof and selected action");
-    check(symmetry_result.statistics.player_nodes == 22170 &&
-              symmetry_result.statistics.environment_nodes == 1884,
+    check(symmetry_result.statistics.player_nodes == 22171 &&
+              symmetry_result.statistics.environment_nodes == 1883,
           "complete target-8 symmetry TT expanded-node counts mismatch");
-    check(symmetry_result.statistics.player_tt_stores == 22170 &&
-              symmetry_result.statistics.environment_tt_stores == 1884,
+    check(symmetry_result.statistics.player_tt_stores == 22171 &&
+              symmetry_result.statistics.environment_tt_stores == 1883,
           "complete target-8 symmetry TT entry counts mismatch");
-    check(symmetry_result.statistics.player_tt_hits == 4099 &&
-              symmetry_result.statistics.environment_tt_hits == 4866,
+    check(symmetry_result.statistics.player_tt_hits == 4094 &&
+              symmetry_result.statistics.environment_tt_hits == 4836,
           "complete target-8 symmetry TT total hit counts mismatch");
-    check(symmetry_result.statistics.player_tt_symmetry_hits == 3033 &&
-              symmetry_result.statistics.environment_tt_symmetry_hits == 2775,
+    check(symmetry_result.statistics.player_tt_symmetry_hits == 3054 &&
+              symmetry_result.statistics.environment_tt_symmetry_hits == 2740,
           "complete target-8 symmetry-derived hit counts mismatch");
     check(symmetry_result.statistics.player_tt_stores < tt_result.statistics.player_tt_stores &&
               symmetry_result.statistics.environment_tt_stores <
@@ -1082,7 +1089,9 @@ void testSgfActionEncodingEscapingAndOrder()
     down->expanded = true;
     down->dfs_order = 0;
     down->incoming_action = SearchAction::slide(Direction::Down);
-    down->value = 42.5;
+    down->reward = 4;
+    down->afterstate_value = 38.5;
+    down->action_value = 42.5;
     down->children_total = 1;
 
     auto spawned = std::make_unique<TraceNode>();
@@ -1108,7 +1117,9 @@ void testSgfActionEncodingEscapingAndOrder()
     right->tt_source_trace_id = 2;
     right->dfs_order = 1;
     right->incoming_action = SearchAction::slide(Direction::Right);
-    right->value = 10.0;
+    right->reward = 0;
+    right->afterstate_value = 10.0;
+    right->action_value = 10.0;
 
     root.children.push_back(std::move(down));
     root.children.push_back(std::move(right));
@@ -1143,6 +1154,10 @@ void testSgfActionEncodingEscapingAndOrder()
     check(sgf.find("config_file = solver/test.cfg") != std::string::npos &&
               sgf.find("fixed_opening = 4@2,2@15") != std::string::npos,
           "SGF metadata must preserve cfg path and runtime fixed opening");
+    check(sgf.find("reward = 4") != std::string::npos &&
+              sgf.find("afterstate_value = 38.5") != std::string::npos &&
+              sgf.find("action_value = 42.5") != std::string::npos,
+          "SGF must distinguish slide reward, V(afterstate), and their action value sum");
 
     const std::vector<std::string> solved_by = parseCommentFields(sgf, "solved_by");
     check(solved_by == std::vector<std::string>(
@@ -1196,7 +1211,8 @@ int main()
         {"Environment AND: all Win", testEnvironmentAndAllWin},
         {"Environment AND: Loss short-circuit", testEnvironmentAndLossShortCircuit},
         {"Environment AND: Unknown is not short-circuit", testEnvironmentUnknownIsNotShortCircuit},
-        {"value ordering and direction tie-break", testValueOrderingAndDirectionTieBreak},
+        {"reward + value ordering and direction tie-break",
+         testActionValueOrderingAndDirectionTieBreak},
         {"solver.cfg parsing and validation", testSolverConfigParsingAndValidation},
         {"D4 canonicalization and action transforms", testD4CanonicalizationAndActionTransforms},
         {"Player symmetry TT hit and witness mapping",

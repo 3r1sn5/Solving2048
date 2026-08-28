@@ -844,10 +844,11 @@ function bootViewer() {
       group.appendChild(metaText);
 
       const tooltip = makeSvgElement("title");
-      const value = commentValue(node, "v");
+      const afterstateValue = commentValue(node, "afterstate_value") || commentValue(node, "v");
+      const actionValue = commentValue(node, "action_value") || afterstateValue;
       const siblingOrder = node.synthetic ? "skipped" : commentValue(node, "dfs_order") || "unknown";
       const transform = commentValue(node, "tt_transform");
-      tooltip.textContent = `${fullLabel}${traceId ? `\nnode id: ${traceId}` : ""}\nglobal DFS visit: ${node.synthetic ? "skipped" : visitOrder || "unknown"}\nsibling DFS order: ${siblingOrder}\n${phase} / ${phase === "PLAYER" ? "OR" : "AND"}\nstatus: ${status}\nsolved by: ${solvedByOf(node)}\ndepth: ${relativeDepth(node, state.searchRoot)}${ttHit ? `\n${symmetryTtHit ? "SYMMETRY " : ""}TT HIT -> node ${sourceId || "unknown"}${transform ? `\ntransform: ${transform}` : ""}` : ""}${value ? `\nv: ${value}` : ""}`;
+      tooltip.textContent = `${fullLabel}${traceId ? `\nnode id: ${traceId}` : ""}\nglobal DFS visit: ${node.synthetic ? "skipped" : visitOrder || "unknown"}\nsibling DFS order: ${siblingOrder}\n${phase} / ${phase === "PLAYER" ? "OR" : "AND"}\nstatus: ${status}\nsolved by: ${solvedByOf(node)}\ndepth: ${relativeDepth(node, state.searchRoot)}${ttHit ? `\n${symmetryTtHit ? "SYMMETRY " : ""}TT HIT -> node ${sourceId || "unknown"}${transform ? `\ntransform: ${transform}` : ""}` : ""}${actionValue ? `\naction value: ${actionValue}` : ""}`;
       group.appendChild(tooltip);
 
       if (entry.hasChildren) {
@@ -993,7 +994,10 @@ function bootViewer() {
       ["TT reference", ttHit ? `HIT → #${ttSourceId || "?"}` : "no"],
       ["TT symmetry hit", ttHit ? (symmetryTtHit ? "yes" : "no") : "—"],
       ["TT transform", ttHit ? commentValue(selected, "tt_transform") : ""],
-      ["V(afterstate)", commentValue(selected, "v")],
+      ["Reward", commentValue(selected, "reward")],
+      ["V(afterstate)", commentValue(selected, "afterstate_value") || commentValue(selected, "v")],
+      ["Reward + V", commentValue(selected, "action_value")],
+      ["Selected action value", commentValue(selected, "selected_action_value") || commentValue(selected, "selected_value")],
       ["Children total", stats.total || String(nonSyntheticChildren + syntheticChildren)],
       ["Expanded", stats.expanded || String(nonSyntheticChildren)],
       ["Skipped", stats.skipped || String(syntheticChildren)],
@@ -1037,12 +1041,13 @@ function bootViewer() {
 
       const value = document.createElement("span");
       value.className = "child-value";
-      const v = commentValue(child, "v");
+      const afterstateValue = commentValue(child, "afterstate_value") || commentValue(child, "v");
+      const actionValue = commentValue(child, "action_value") || afterstateValue;
       value.textContent = child.synthetic
         ? "not searched"
         : ttHit
           ? `TT → #${ttSourceId || "?"}`
-          : `v ${v || "—"}`;
+          : `Q ${actionValue || "—"}`;
 
       const phase = phaseOf(child, state.searchRoot);
       const phaseBadge = document.createElement("span");

@@ -56,11 +56,17 @@ std::string nodeComment(const TraceNode& node, const SgfMetadata* metadata)
         comment << '\n';
     }
     comment << "terminal_reason = " << terminalReasonName(node.terminal_reason);
-    if (node.value) comment << '\n' << "v = " << *node.value;
+    if (node.reward) comment << '\n' << "reward = " << *node.reward;
+    if (node.afterstate_value) {
+        comment << '\n' << "afterstate_value = " << *node.afterstate_value;
+    }
+    if (node.action_value) comment << '\n' << "action_value = " << *node.action_value;
     if (node.selected_action) {
         comment << '\n' << "selected_action = " << node.selected_action->summaryToken();
     }
-    if (node.selected_value) comment << '\n' << "selected_value = " << *node.selected_value;
+    if (node.selected_action_value) {
+        comment << '\n' << "selected_action_value = " << *node.selected_action_value;
+    }
 
     if (metadata) {
         comment << '\n' << "winning_tile = " << metadata->winning_tile

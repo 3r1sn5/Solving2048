@@ -75,7 +75,7 @@ SearchResult Solver::solve()
     result.statistics = statistics_;
     if (root->selected_action && root->selected_action->kind == SearchAction::Kind::Slide) {
         result.root_action = root->selected_action->direction;
-        result.root_value = root->selected_value;
+        result.root_action_value = root->selected_action_value;
     }
     result.root = std::move(root);
     return result;
@@ -99,15 +99,15 @@ SearchAction Solver::transformAction(const SearchAction& action, std::uint8_t tr
     return SearchAction::placement(transformPosition(action.position, transform), action.tile);
 }
 
-double Solver::selectedSlideValue(Board board, Direction direction) const
+double Solver::selectedSlideActionValue(Board board, Direction direction) const
 {
     for (const SlideResult& slide : game_.legalSlides(board)) {
         if (slide.direction != direction) continue;
-        const double value = game_.evaluateAfterstate(slide.afterstate);
-        if (!std::isfinite(value)) {
+        const double afterstate_value = game_.evaluateAfterstate(slide.afterstate);
+        if (!std::isfinite(afterstate_value)) {
             throw std::runtime_error("N-tuple evaluator returned a non-finite value");
         }
-        return value;
+        return static_cast<double>(slide.reward) + afterstate_value;
     }
     throw std::logic_error("symmetry TT restored an illegal Player slide witness");
 }
@@ -137,10 +137,11 @@ bool Solver::lookupPlayerTransposition(Board board, TraceNode& trace)
     if (entry.selected_action) {
         trace.selected_action = transformAction(*entry.selected_action, inverseTransform(key.transform));
     }
-    trace.selected_value = entry.selected_value;
+    trace.selected_action_value = entry.selected_action_value;
     if (symmetry_hit && trace.selected_action &&
         trace.selected_action->kind == SearchAction::Kind::Slide) {
-        trace.selected_value = selectedSlideValue(board, trace.selected_action->direction);
+        trace.selected_action_value =
+            selectedSlideActionValue(board, trace.selected_action->direction);
     }
     return true;
 }
@@ -170,7 +171,7 @@ bool Solver::lookupEnvironmentTransposition(Board afterstate, TraceNode& trace)
     if (entry.selected_action) {
         trace.selected_action = transformAction(*entry.selected_action, inverseTransform(key.transform));
     }
-    trace.selected_value = entry.selected_value;
+    trace.selected_action_value = entry.selected_action_value;
     return true;
 }
 
@@ -183,7 +184,7 @@ void Solver::storePlayerTransposition(Board board, const TraceNode& trace)
     entry.source_trace_id = trace.trace_id;
     entry.children_total = trace.children_total;
     if (trace.selected_action) entry.selected_action = transformAction(*trace.selected_action, key.transform);
-    entry.selected_value = trace.selected_value;
+    entry.selected_action_value = trace.selected_action_value;
     entry.source_transform = key.transform;
     const auto [found, inserted] = player_tt_.emplace(key.board.raw, std::move(entry));
     if (!inserted && found->second.outcome != trace.outcome) {
@@ -201,7 +202,7 @@ void Solver::storeEnvironmentTransposition(Board afterstate, const TraceNode& tr
     entry.source_trace_id = trace.trace_id;
     entry.children_total = trace.children_total;
     if (trace.selected_action) entry.selected_action = transformAction(*trace.selected_action, key.transform);
-    entry.selected_value = trace.selected_value;
+    entry.selected_action_value = trace.selected_action_value;
     entry.source_transform = key.transform;
     const auto [found, inserted] = environment_tt_.emplace(key.board.raw, std::move(entry));
     if (!inserted && found->second.outcome != trace.outcome) {
@@ -249,12 +250,15 @@ Outcome Solver::solvePlayer(Board board, TraceNode& trace)
 
     std::vector<OrderedSlide> actions;
     for (const SlideResult& slide : game_.legalSlides(board)) {
-        const double value = game_.evaluateAfterstate(slide.afterstate);
-        if (!std::isfinite(value)) throw std::runtime_error("N-tuple evaluator returned a non-finite value");
-        actions.push_back({slide, value});
+        const double afterstate_value = game_.evaluateAfterstate(slide.afterstate);
+        if (!std::isfinite(afterstate_value)) {
+            throw std::runtime_error("N-tuple evaluator returned a non-finite value");
+        }
+        const double action_value = static_cast<double>(slide.reward) + afterstate_value;
+        actions.push_back({slide, afterstate_value, action_value});
     }
     std::sort(actions.begin(), actions.end(), [](const OrderedSlide& lhs, const OrderedSlide& rhs) {
-        if (lhs.value != rhs.value) return lhs.value > rhs.value;
+        if (lhs.action_value != rhs.action_value) return lhs.action_value > rhs.action_value;
         return directionOpcode(lhs.slide.direction) < directionOpcode(rhs.slide.direction);
     });
 
@@ -275,7 +279,9 @@ Outcome Solver::solvePlayer(Board board, TraceNode& trace)
         child->phase = Phase::Environment;
         child->dfs_order = index;
         child->incoming_action = SearchAction::slide(action.slide.direction);
-        child->value = action.value;
+        child->reward = action.slide.reward;
+        child->afterstate_value = action.afterstate_value;
+        child->action_value = action.action_value;
         assignTraceId(*child);
 
         Outcome child_outcome;
@@ -292,7 +298,7 @@ Outcome Solver::solvePlayer(Board board, TraceNode& trace)
         if (child_outcome == Outcome::Win) {
             trace.outcome = Outcome::Win;
             trace.selected_action = SearchAction::slide(action.slide.direction);
-            trace.selected_value = action.value;
+            trace.selected_action_value = action.action_value;
             for (std::size_t skipped = index + 1; skipped < actions.size(); ++skipped) {
                 trace.skipped_actions.push_back(SearchAction::slide(actions[skipped].slide.direction));
             }

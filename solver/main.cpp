@@ -207,7 +207,10 @@ int main(int argc, char** argv)
                   << "root result: " << outcomeName(result.outcome) << '\n';
         if (result.outcome == Outcome::Win && result.root_action) {
             std::cout << "root action: " << directionName(*result.root_action) << '\n';
-            if (result.root_value) std::cout << "root action V(afterstate): " << *result.root_value << '\n';
+            if (result.root_action_value) {
+                std::cout << "root action reward + V(afterstate): "
+                          << *result.root_action_value << '\n';
+            }
         }
         std::cout << "player nodes: " << result.statistics.player_nodes << '\n'
                   << "environment nodes: " << result.statistics.environment_nodes << '\n'
