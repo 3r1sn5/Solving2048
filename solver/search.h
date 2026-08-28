@@ -1,6 +1,5 @@
 #pragma once
 
-#include "config.h"
 #include "game_api.h"
 
 #include <cstddef>
@@ -33,6 +32,14 @@ enum class TerminalReason {
     TranspositionTable,
 };
 
+enum class SolvedBy {
+    None,
+    Terminal,
+    TranspositionTable,
+    Backpropagation,
+    NodeLimit,
+};
+
 struct SearchAction {
     enum class Kind {
         Slide,
@@ -58,11 +65,14 @@ struct TraceNode {
     Phase phase = Phase::Player;
     Outcome outcome = Outcome::Unknown;
     TerminalReason terminal_reason = TerminalReason::None;
+    SolvedBy solved_by = SolvedBy::None;
     bool expanded = false;
     bool tt_hit = false;
     std::size_t dfs_order = 0;
     std::size_t children_total = 0;
     std::optional<std::uint64_t> tt_source_trace_id;
+    bool tt_symmetry_hit = false;
+    std::optional<std::uint8_t> tt_transform;
     std::optional<SearchAction> incoming_action;
     std::optional<double> value;
     std::optional<SearchAction> selected_action;
@@ -81,17 +91,27 @@ struct SearchStatistics {
     std::uint64_t environment_tt_hits = 0;
     std::uint64_t player_tt_stores = 0;
     std::uint64_t environment_tt_stores = 0;
+    std::uint64_t player_tt_symmetry_hits = 0;
+    std::uint64_t environment_tt_symmetry_hits = 0;
 
     std::uint64_t combinedNodes() const { return player_nodes + environment_nodes; }
     std::uint64_t ttHits() const { return player_tt_hits + environment_tt_hits; }
     std::uint64_t ttStores() const { return player_tt_stores + environment_tt_stores; }
+    std::uint64_t ttSymmetryHits() const {
+        return player_tt_symmetry_hits + environment_tt_symmetry_hits;
+    }
+    std::uint64_t playerTtExactHits() const { return player_tt_hits - player_tt_symmetry_hits; }
+    std::uint64_t environmentTtExactHits() const {
+        return environment_tt_hits - environment_tt_symmetry_hits;
+    }
 };
 
 struct SolverOptions {
-    unsigned winning_tile = config::kDefaultWinningTile;
-    std::uint64_t node_limit = config::kDefaultNodeLimit;
-    std::uint64_t progress_interval = config::kDefaultProgressInterval;
-    bool use_transposition_table = config::kDefaultUseTranspositionTable;
+    unsigned winning_tile = 8;
+    std::uint64_t node_limit = 0;
+    std::uint64_t progress_interval = 0;
+    bool use_transposition_table = false;
+    bool use_tt_symmetry = false;
 };
 
 struct SearchResult {
@@ -121,6 +141,7 @@ private:
         std::size_t children_total = 0;
         std::optional<SearchAction> selected_action;
         std::optional<double> selected_value;
+        std::uint8_t source_transform = 0;
     };
 
     Outcome solvePlayer(Board board, TraceNode& trace);
@@ -130,6 +151,9 @@ private:
     bool lookupEnvironmentTransposition(Board afterstate, TraceNode& trace);
     void storePlayerTransposition(Board board, const TraceNode& trace);
     void storeEnvironmentTransposition(Board afterstate, const TraceNode& trace);
+    CanonicalBoard transpositionKey(Board board) const;
+    static SearchAction transformAction(const SearchAction& action, std::uint8_t transform);
+    double selectedSlideValue(Board board, Direction direction) const;
     bool atNodeLimit() const;
     void expandedNode();
 
@@ -145,5 +169,6 @@ private:
 const char* outcomeName(Outcome outcome);
 const char* phaseName(Phase phase);
 const char* terminalReasonName(TerminalReason reason);
+const char* solvedByName(SolvedBy solved_by);
 
 } // namespace solver2048

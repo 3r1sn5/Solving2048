@@ -55,6 +55,9 @@ Solver::Solver(const Game& game, SolverOptions options, ProgressCallback progres
     if (options_.winning_tile < 2 || (options_.winning_tile & (options_.winning_tile - 1)) != 0) {
         throw std::invalid_argument("winning tile must be a power of two and at least 2");
     }
+    if (options_.use_tt_symmetry && !options_.use_transposition_table) {
+        throw std::invalid_argument("TT symmetry requires the transposition table to be enabled");
+    }
 }
 
 SearchResult Solver::solve()
@@ -83,10 +86,37 @@ void Solver::assignTraceId(TraceNode& trace)
     if (trace.trace_id == 0) trace.trace_id = ++next_trace_id_;
 }
 
+CanonicalBoard Solver::transpositionKey(Board board) const
+{
+    return options_.use_tt_symmetry ? canonicalize(board) : CanonicalBoard{board, 0};
+}
+
+SearchAction Solver::transformAction(const SearchAction& action, std::uint8_t transform)
+{
+    if (action.kind == SearchAction::Kind::Slide) {
+        return SearchAction::slide(transformDirection(action.direction, transform));
+    }
+    return SearchAction::placement(transformPosition(action.position, transform), action.tile);
+}
+
+double Solver::selectedSlideValue(Board board, Direction direction) const
+{
+    for (const SlideResult& slide : game_.legalSlides(board)) {
+        if (slide.direction != direction) continue;
+        const double value = game_.evaluateAfterstate(slide.afterstate);
+        if (!std::isfinite(value)) {
+            throw std::runtime_error("N-tuple evaluator returned a non-finite value");
+        }
+        return value;
+    }
+    throw std::logic_error("symmetry TT restored an illegal Player slide witness");
+}
+
 bool Solver::lookupPlayerTransposition(Board board, TraceNode& trace)
 {
     if (!options_.use_transposition_table) return false;
-    const auto found = player_tt_.find(board.raw);
+    const CanonicalBoard key = transpositionKey(board);
+    const auto found = player_tt_.find(key.board.raw);
     if (found == player_tt_.end()) return false;
 
     const TranspositionEntry& entry = found->second;
@@ -94,20 +124,32 @@ bool Solver::lookupPlayerTransposition(Board board, TraceNode& trace)
         throw std::logic_error("Player TT contained an inexact Unknown entry");
     }
     ++statistics_.player_tt_hits;
+    const bool symmetry_hit = options_.use_tt_symmetry && entry.source_transform != key.transform;
+    if (symmetry_hit) ++statistics_.player_tt_symmetry_hits;
     trace.outcome = entry.outcome;
     trace.terminal_reason = TerminalReason::TranspositionTable;
+    trace.solved_by = SolvedBy::TranspositionTable;
     trace.tt_hit = true;
     trace.tt_source_trace_id = entry.source_trace_id;
+    trace.tt_symmetry_hit = symmetry_hit;
+    if (options_.use_tt_symmetry) trace.tt_transform = key.transform;
     trace.children_total = entry.children_total;
-    trace.selected_action = entry.selected_action;
+    if (entry.selected_action) {
+        trace.selected_action = transformAction(*entry.selected_action, inverseTransform(key.transform));
+    }
     trace.selected_value = entry.selected_value;
+    if (symmetry_hit && trace.selected_action &&
+        trace.selected_action->kind == SearchAction::Kind::Slide) {
+        trace.selected_value = selectedSlideValue(board, trace.selected_action->direction);
+    }
     return true;
 }
 
 bool Solver::lookupEnvironmentTransposition(Board afterstate, TraceNode& trace)
 {
     if (!options_.use_transposition_table) return false;
-    const auto found = environment_tt_.find(afterstate.raw);
+    const CanonicalBoard key = transpositionKey(afterstate);
+    const auto found = environment_tt_.find(key.board.raw);
     if (found == environment_tt_.end()) return false;
 
     const TranspositionEntry& entry = found->second;
@@ -115,12 +157,19 @@ bool Solver::lookupEnvironmentTransposition(Board afterstate, TraceNode& trace)
         throw std::logic_error("Environment TT contained an inexact Unknown entry");
     }
     ++statistics_.environment_tt_hits;
+    const bool symmetry_hit = options_.use_tt_symmetry && entry.source_transform != key.transform;
+    if (symmetry_hit) ++statistics_.environment_tt_symmetry_hits;
     trace.outcome = entry.outcome;
     trace.terminal_reason = TerminalReason::TranspositionTable;
+    trace.solved_by = SolvedBy::TranspositionTable;
     trace.tt_hit = true;
     trace.tt_source_trace_id = entry.source_trace_id;
+    trace.tt_symmetry_hit = symmetry_hit;
+    if (options_.use_tt_symmetry) trace.tt_transform = key.transform;
     trace.children_total = entry.children_total;
-    trace.selected_action = entry.selected_action;
+    if (entry.selected_action) {
+        trace.selected_action = transformAction(*entry.selected_action, inverseTransform(key.transform));
+    }
     trace.selected_value = entry.selected_value;
     return true;
 }
@@ -128,13 +177,15 @@ bool Solver::lookupEnvironmentTransposition(Board afterstate, TraceNode& trace)
 void Solver::storePlayerTransposition(Board board, const TraceNode& trace)
 {
     if (!options_.use_transposition_table || trace.outcome == Outcome::Unknown) return;
+    const CanonicalBoard key = transpositionKey(board);
     TranspositionEntry entry;
     entry.outcome = trace.outcome;
     entry.source_trace_id = trace.trace_id;
     entry.children_total = trace.children_total;
-    entry.selected_action = trace.selected_action;
+    if (trace.selected_action) entry.selected_action = transformAction(*trace.selected_action, key.transform);
     entry.selected_value = trace.selected_value;
-    const auto [found, inserted] = player_tt_.emplace(board.raw, std::move(entry));
+    entry.source_transform = key.transform;
+    const auto [found, inserted] = player_tt_.emplace(key.board.raw, std::move(entry));
     if (!inserted && found->second.outcome != trace.outcome) {
         throw std::logic_error("conflicting exact outcomes for one Player TT key");
     }
@@ -144,13 +195,15 @@ void Solver::storePlayerTransposition(Board board, const TraceNode& trace)
 void Solver::storeEnvironmentTransposition(Board afterstate, const TraceNode& trace)
 {
     if (!options_.use_transposition_table || trace.outcome == Outcome::Unknown) return;
+    const CanonicalBoard key = transpositionKey(afterstate);
     TranspositionEntry entry;
     entry.outcome = trace.outcome;
     entry.source_trace_id = trace.trace_id;
     entry.children_total = trace.children_total;
-    entry.selected_action = trace.selected_action;
+    if (trace.selected_action) entry.selected_action = transformAction(*trace.selected_action, key.transform);
     entry.selected_value = trace.selected_value;
-    const auto [found, inserted] = environment_tt_.emplace(afterstate.raw, std::move(entry));
+    entry.source_transform = key.transform;
+    const auto [found, inserted] = environment_tt_.emplace(key.board.raw, std::move(entry));
     if (!inserted && found->second.outcome != trace.outcome) {
         throw std::logic_error("conflicting exact outcomes for one Environment TT key");
     }
@@ -177,6 +230,7 @@ Outcome Solver::solvePlayer(Board board, TraceNode& trace)
     if (game_.hasWinningTile(board, options_.winning_tile)) {
         trace.outcome = Outcome::Win;
         trace.terminal_reason = TerminalReason::WinningTile;
+        trace.solved_by = SolvedBy::Terminal;
         return trace.outcome;
     }
     if (lookupPlayerTransposition(board, trace)) return trace.outcome;
@@ -184,10 +238,12 @@ Outcome Solver::solvePlayer(Board board, TraceNode& trace)
         ++statistics_.node_limit_cutoffs;
         trace.outcome = Outcome::Unknown;
         trace.terminal_reason = TerminalReason::NodeLimit;
+        trace.solved_by = SolvedBy::NodeLimit;
         return trace.outcome;
     }
 
     trace.expanded = true;
+    trace.solved_by = SolvedBy::Backpropagation;
     ++statistics_.player_nodes;
     expandedNode();
 
@@ -207,6 +263,7 @@ Outcome Solver::solvePlayer(Board board, TraceNode& trace)
     if (actions.empty()) {
         trace.outcome = Outcome::Loss;
         trace.terminal_reason = TerminalReason::NoLegalMove;
+        trace.solved_by = SolvedBy::Terminal;
         storePlayerTransposition(board, trace);
         return trace.outcome;
     }
@@ -225,6 +282,7 @@ Outcome Solver::solvePlayer(Board board, TraceNode& trace)
         if (game_.hasWinningTile(action.slide.afterstate, options_.winning_tile)) {
             child->outcome = Outcome::Win;
             child->terminal_reason = TerminalReason::WinningTile;
+            child->solved_by = SolvedBy::Terminal;
             child_outcome = Outcome::Win;
         } else {
             child_outcome = solveEnvironment(action.slide.afterstate, *child);
@@ -256,6 +314,7 @@ Outcome Solver::solveEnvironment(Board afterstate, TraceNode& trace)
     if (game_.hasWinningTile(afterstate, options_.winning_tile)) {
         trace.outcome = Outcome::Win;
         trace.terminal_reason = TerminalReason::WinningTile;
+        trace.solved_by = SolvedBy::Terminal;
         return trace.outcome;
     }
     if (lookupEnvironmentTransposition(afterstate, trace)) return trace.outcome;
@@ -263,10 +322,12 @@ Outcome Solver::solveEnvironment(Board afterstate, TraceNode& trace)
         ++statistics_.node_limit_cutoffs;
         trace.outcome = Outcome::Unknown;
         trace.terminal_reason = TerminalReason::NodeLimit;
+        trace.solved_by = SolvedBy::NodeLimit;
         return trace.outcome;
     }
 
     trace.expanded = true;
+    trace.solved_by = SolvedBy::Backpropagation;
     ++statistics_.environment_nodes;
     expandedNode();
 
@@ -328,6 +389,18 @@ const char* terminalReasonName(TerminalReason reason)
         case TerminalReason::NoLegalMove: return "NO_LEGAL_MOVE";
         case TerminalReason::NodeLimit: return "NODE_LIMIT";
         case TerminalReason::TranspositionTable: return "TRANSPOSITION_TABLE";
+    }
+    return "NONE";
+}
+
+const char* solvedByName(SolvedBy solved_by)
+{
+    switch (solved_by) {
+        case SolvedBy::None: return "NONE";
+        case SolvedBy::Terminal: return "TERMINAL";
+        case SolvedBy::TranspositionTable: return "TT";
+        case SolvedBy::Backpropagation: return "BACKPROPAGATION";
+        case SolvedBy::NodeLimit: return "NODE_LIMIT";
     }
     return "NONE";
 }

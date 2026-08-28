@@ -2,25 +2,31 @@
 
 #include <array>
 #include <cstdint>
+#include <filesystem>
+#include <string>
 
-namespace solver2048::config {
+namespace solver2048 {
 
-inline constexpr unsigned kDefaultWinningTile = 8;
-inline constexpr std::uint64_t kDefaultNodeLimit = 100'000;
-inline constexpr std::uint64_t kDefaultProgressInterval = 100'000;
-// Keep the original raw DFS baseline as the default. Enable this for the exact
-// DAG search experiment, or override it with --tt / --no-tt.
-inline constexpr bool kDefaultUseTranspositionTable = false;
-inline constexpr const char* kDefaultNetwork = "4x6patt";
-inline constexpr const char* kDefaultModelPath = "models/4x6patt.w";
-inline constexpr const char* kDefaultSgfPath = "solver/tree.sgf";
-
-// Row-major tile values. The opening is complete and the root is a Player node.
-inline constexpr std::array<unsigned, 16> kFixedOpening = {
-    2, 2, 0, 0,
-    0, 0, 0, 0,
-    0, 0, 0, 0,
-    0, 0, 0, 0,
+struct SolverConfig {
+    unsigned winning_tile = 0;
+    std::uint64_t node_limit = 0;
+    std::uint64_t progress_interval = 0;
+    bool use_transposition_table = false;
+    bool use_tt_symmetry = false;
+    std::array<unsigned, 16> opening{};
+    std::string network;
+    std::string model_path;
+    std::filesystem::path sgf_path;
 };
 
-} // namespace solver2048::config
+namespace config {
+
+inline constexpr const char* kDefaultConfigPath = "solver/solver.cfg";
+
+} // namespace config
+
+SolverConfig loadSolverConfig(const std::filesystem::path& path);
+void validateSolverConfig(const SolverConfig& config);
+std::string formatOpening(const std::array<unsigned, 16>& opening);
+
+} // namespace solver2048

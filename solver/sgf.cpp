@@ -1,4 +1,5 @@
 #include "sgf.h"
+#include "config.h"
 
 #include <fstream>
 #include <iomanip>
@@ -23,6 +24,7 @@ std::string nodeComment(const TraceNode& node, const SgfMetadata* metadata)
     std::ostringstream comment;
     comment << std::setprecision(12);
     comment << "solver_status: " << outcomeName(node.outcome) << '\n'
+            << "solved_by = " << solvedByName(node.solved_by) << '\n'
             << "node_id = " << node.trace_id << '\n'
             << "dfs_visit_order = " << node.trace_id << '\n'
             << "node_type = " << phaseName(node.phase) << '\n'
@@ -35,6 +37,11 @@ std::string nodeComment(const TraceNode& node, const SgfMetadata* metadata)
 
     if (node.tt_hit) {
         comment << "tt_hit = true\n";
+        comment << "tt_symmetry_hit = " << (node.tt_symmetry_hit ? "true" : "false") << '\n';
+        if (node.tt_transform) {
+            comment << "tt_transform = " << static_cast<unsigned>(*node.tt_transform)
+                    << ':' << symmetryTransformName(*node.tt_transform) << '\n';
+        }
         if (node.tt_source_trace_id) {
             comment << "tt_source_node_id = " << *node.tt_source_trace_id << '\n';
         }
@@ -60,9 +67,12 @@ std::string nodeComment(const TraceNode& node, const SgfMetadata* metadata)
                 << '\n' << "node_limit = " << metadata->node_limit
                 << '\n' << "transposition_table = "
                 << (metadata->use_transposition_table ? "enabled" : "disabled")
+                << '\n' << "tt_symmetry = "
+                << (metadata->use_tt_symmetry ? "enabled" : "disabled")
+                << '\n' << "config_file = " << metadata->config_path.string()
                 << '\n' << "network = " << metadata->network
                 << '\n' << "model = " << metadata->model_path
-                << '\n' << "fixed_opening = 2@0 2@1"
+                << '\n' << "fixed_opening = " << formatOpening(metadata->opening)
                 << '\n' << "elapsed_seconds = " << metadata->elapsed_seconds
                 << '\n' << "player_nodes = " << metadata->statistics.player_nodes
                 << '\n' << "environment_nodes = " << metadata->statistics.environment_nodes
@@ -71,6 +81,13 @@ std::string nodeComment(const TraceNode& node, const SgfMetadata* metadata)
                 << '\n' << "node_limit_cutoffs = " << metadata->statistics.node_limit_cutoffs
                 << '\n' << "player_tt_hits = " << metadata->statistics.player_tt_hits
                 << '\n' << "environment_tt_hits = " << metadata->statistics.environment_tt_hits
+                << '\n' << "player_tt_exact_hits = " << metadata->statistics.playerTtExactHits()
+                << '\n' << "environment_tt_exact_hits = "
+                << metadata->statistics.environmentTtExactHits()
+                << '\n' << "player_tt_symmetry_hits = "
+                << metadata->statistics.player_tt_symmetry_hits
+                << '\n' << "environment_tt_symmetry_hits = "
+                << metadata->statistics.environment_tt_symmetry_hits
                 << '\n' << "player_tt_entries = " << metadata->statistics.player_tt_stores
                 << '\n' << "environment_tt_entries = " << metadata->statistics.environment_tt_stores;
     }
@@ -108,6 +125,15 @@ void SgfWriter::write(const std::filesystem::path& output_path,
                       const SgfMetadata& metadata)
 {
     if (output_path.empty()) throw std::invalid_argument("SGF output path cannot be empty");
+    std::vector<SearchAction> opening_actions;
+    for (std::size_t position = 0; position < metadata.opening.size(); ++position) {
+        const unsigned tile = metadata.opening[position];
+        if (tile == 0) continue;
+        opening_actions.push_back(SearchAction::placement(static_cast<int>(position), tile));
+    }
+    if (opening_actions.size() != 2) {
+        throw std::invalid_argument("SGF fixed opening requires exactly two tile placements");
+    }
     if (!output_path.parent_path().empty()) {
         std::error_code directory_error;
         std::filesystem::create_directories(output_path.parent_path(), directory_error);
@@ -122,9 +148,13 @@ void SgfWriter::write(const std::filesystem::path& output_path,
         std::ofstream output(temporary_path, std::ios::out | std::ios::trunc | std::ios::binary);
         if (!output) throw std::runtime_error("cannot open temporary SGF file: " + temporary_path.string());
 
-        output << "(;FF[4]CA[UTF-8]SZ[4]AP[Solving2048:1]"
-               << ";W[4]"
-               << ";W[5]C[" << escapeValue(nodeComment(root, &metadata)) << ']';
+        output << "(;FF[4]CA[UTF-8]SZ[4]AP[Solving2048:1]";
+        for (std::size_t index = 0; index < opening_actions.size(); ++index) {
+            output << ";W[" << opening_actions[index].sgfId() << ']';
+            if (index + 1 == opening_actions.size()) {
+                output << "C[" << escapeValue(nodeComment(root, &metadata)) << ']';
+            }
+        }
         for (const auto& child : root.children) {
             output << '(';
             writeNode(output, *child);

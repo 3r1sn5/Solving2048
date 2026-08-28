@@ -1,6 +1,5 @@
 #include "game_api.h"
 
-#include "config.h"
 #include "../2048_api.h"
 
 #include <cmath>
@@ -35,8 +34,10 @@ Board makeBoard(const std::array<unsigned, 16>& tiles)
 
 } // namespace
 
-GameApi::GameApi(std::string network, std::string model_path)
-    : network_(std::move(network)), model_path_(std::move(model_path))
+GameApi::GameApi(std::string network,
+                 std::string model_path,
+                 const std::array<unsigned, 16>& opening)
+    : network_(std::move(network)), model_path_(std::move(model_path)), opening_(makeBoard(opening))
 {
     if (network_ != "4x6patt") {
         throw std::invalid_argument("the first solver version supports only the 4x6patt network");
@@ -56,7 +57,7 @@ GameApi::GameApi(std::string network, std::string model_path)
 
 Board GameApi::fixedOpening() const
 {
-    return makeBoard(config::kFixedOpening);
+    return opening_;
 }
 
 bool GameApi::hasWinningTile(Board value, unsigned winning_tile) const
@@ -123,6 +124,55 @@ const char* directionName(Direction direction)
 int directionOpcode(Direction direction)
 {
     return static_cast<int>(direction);
+}
+
+Board transformBoard(Board value, std::uint8_t transform)
+{
+    return {moporgic::solver_api::transformBoard(value.raw, transform)};
+}
+
+int transformPosition(int position, std::uint8_t transform)
+{
+    if (position < 0 || position >= 16) {
+        throw std::out_of_range("2048 board position must be in [0, 15]");
+    }
+    return static_cast<int>(
+        moporgic::solver_api::transformPosition(static_cast<unsigned>(position), transform));
+}
+
+Direction transformDirection(Direction direction, std::uint8_t transform)
+{
+    const unsigned opcode = moporgic::solver_api::transformDirectionOpcode(
+        static_cast<unsigned>(directionOpcode(direction)), transform);
+    return static_cast<Direction>(opcode);
+}
+
+std::uint8_t inverseTransform(std::uint8_t transform)
+{
+    return static_cast<std::uint8_t>(moporgic::solver_api::inverseTransform(transform));
+}
+
+CanonicalBoard canonicalize(Board value)
+{
+    const moporgic::solver_api::CanonicalBoard canonical =
+        moporgic::solver_api::canonicalize(value.raw);
+    return {{canonical.raw}, canonical.transform};
+}
+
+const char* symmetryTransformName(std::uint8_t transform)
+{
+    static constexpr const char* names[8] = {
+        "identity",
+        "rotate90",
+        "rotate180",
+        "rotate270",
+        "flip_vertical",
+        "flip_vertical_rotate90",
+        "flip_vertical_rotate180",
+        "flip_vertical_rotate270",
+    };
+    if (transform >= 8) throw std::out_of_range("2048 symmetry transform must be in [0, 7]");
+    return names[transform];
 }
 
 } // namespace solver2048

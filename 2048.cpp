@@ -2668,6 +2668,62 @@ unsigned tileExponentAt(RawBoard raw, unsigned position)
 	return board(raw).at(position);
 }
 
+RawBoard transformBoard(RawBoard raw, unsigned transform)
+{
+	if (transform >= 8) throw std::out_of_range("2048 symmetry transform must be in [0, 7]");
+	board transformed(raw);
+	transformed.isom64(transform);
+	return static_cast<u64>(transformed);
+}
+
+unsigned transformPosition(unsigned position, unsigned transform)
+{
+	if (position >= 16) throw std::out_of_range("2048 board position must be in [0, 15]");
+	if (transform >= 8) throw std::out_of_range("2048 symmetry transform must be in [0, 7]");
+
+	unsigned row = position / 4;
+	unsigned column = position % 4;
+	if (transform & 4) row = 3 - row;
+	for (unsigned rotation = 0; rotation < (transform & 3); ++rotation) {
+		const unsigned next_row = column;
+		const unsigned next_column = 3 - row;
+		row = next_row;
+		column = next_column;
+	}
+	return row * 4 + column;
+}
+
+unsigned transformDirectionOpcode(unsigned opcode, unsigned transform)
+{
+	if (opcode >= 4) throw std::out_of_range("2048 direction opcode must be in [0, 3]");
+	if (transform >= 8) throw std::out_of_range("2048 symmetry transform must be in [0, 7]");
+
+	// Opcodes are Up, Right, Down, Left. isom64() applies a vertical flip
+	// before its clockwise rotation for transform ids 4..7.
+	if (transform & 4) {
+		if (opcode == 0) opcode = 2;
+		else if (opcode == 2) opcode = 0;
+	}
+	return (opcode + (transform & 3)) & 3;
+}
+
+unsigned inverseTransform(unsigned transform)
+{
+	if (transform >= 8) throw std::out_of_range("2048 symmetry transform must be in [0, 7]");
+	static constexpr unsigned inverse[8] = {0, 3, 2, 1, 4, 5, 6, 7};
+	return inverse[transform];
+}
+
+CanonicalBoard canonicalize(RawBoard raw)
+{
+	CanonicalBoard canonical{raw, 0};
+	for (unsigned transform = 1; transform < 8; ++transform) {
+		const RawBoard candidate = transformBoard(raw, transform);
+		if (candidate < canonical.raw) canonical = {candidate, static_cast<std::uint8_t>(transform)};
+	}
+	return canonical;
+}
+
 } // namespace solver_api
 
 #ifndef MOPORGIC_NO_MAIN

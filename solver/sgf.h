@@ -2,6 +2,7 @@
 
 #include "search.h"
 
+#include <array>
 #include <cstdint>
 #include <filesystem>
 #include <string>
@@ -12,6 +13,9 @@ struct SgfMetadata {
     unsigned winning_tile = 8;
     std::uint64_t node_limit = 0;
     bool use_transposition_table = false;
+    bool use_tt_symmetry = false;
+    std::filesystem::path config_path;
+    std::array<unsigned, 16> opening{};
     std::string network;
     std::string model_path;
     double elapsed_seconds = 0;

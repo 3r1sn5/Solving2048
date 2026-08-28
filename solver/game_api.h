@@ -14,6 +14,11 @@ struct Board {
     friend constexpr bool operator!=(Board lhs, Board rhs) { return !(lhs == rhs); }
 };
 
+struct CanonicalBoard {
+    Board board;
+    std::uint8_t transform = 0;
+};
+
 enum class Direction : std::uint8_t {
     Up = 0,
     Right = 1,
@@ -47,7 +52,9 @@ public:
 
 class GameApi final : public Game {
 public:
-    GameApi(std::string network, std::string model_path);
+    GameApi(std::string network,
+            std::string model_path,
+            const std::array<unsigned, 16>& opening);
 
     Board fixedOpening() const override;
     bool hasWinningTile(Board board, unsigned winning_tile) const override;
@@ -62,9 +69,16 @@ public:
 private:
     std::string network_;
     std::string model_path_;
+    Board opening_;
 };
 
 const char* directionName(Direction direction);
 int directionOpcode(Direction direction);
+Board transformBoard(Board board, std::uint8_t transform);
+int transformPosition(int position, std::uint8_t transform);
+Direction transformDirection(Direction direction, std::uint8_t transform);
+std::uint8_t inverseTransform(std::uint8_t transform);
+CanonicalBoard canonicalize(Board board);
+const char* symmetryTransformName(std::uint8_t transform);
 
 } // namespace solver2048

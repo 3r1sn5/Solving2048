@@ -149,11 +149,29 @@ function ttSourceNodeIdOf(node) {
   return /^\d+$/.test(value) ? value : "";
 }
 
+function isSymmetryTtHit(node) {
+  if (!node || node.synthetic) return false;
+  const value = commentValue(node, "tt_symmetry_hit").toLowerCase();
+  return value === "true" || value === "1";
+}
+
 function isTtHit(node) {
   if (!node || node.synthetic) return false;
   const flag = commentValue(node, "tt_hit").toLowerCase();
   const reason = commentValue(node, "terminal_reason").toUpperCase();
   return flag === "true" || flag === "1" || reason === "TRANSPOSITION_TABLE" || Boolean(ttSourceNodeIdOf(node));
+}
+
+function solvedByOf(node) {
+  if (!node) return "UNKNOWN";
+  if (node.synthetic) return "SKIPPED";
+  const explicit = commentValue(node, "solved_by").toUpperCase();
+  if (["TERMINAL", "TT", "BACKPROPAGATION", "NODE_LIMIT"].includes(explicit)) return explicit;
+  const reason = commentValue(node, "terminal_reason").toUpperCase();
+  if (isTtHit(node)) return "TT";
+  if (reason === "WINNING_TILE" || reason === "NO_LEGAL_MOVE") return "TERMINAL";
+  if (reason === "NODE_LIMIT") return "NODE_LIMIT";
+  return "BACKPROPAGATION";
 }
 
 function buildTraceNodeIndex(nodes) {
@@ -233,9 +251,16 @@ function materializeSkippedNodes(root, allNodes) {
 }
 
 function findSearchRoot(sgfRoot) {
-  // Fixed opening: W[4] (2@0), then W[5] (2@1). Follow only the sequence
-  // until that exact prefix has been observed.
+  // Current solver SGFs mark the final runtime-configured opening node as the
+  // Player search root. Follow the opening sequence before scanning variations.
   let node = sgfRoot;
+  while (node) {
+    if (commentValue(node, "node_type").toUpperCase() === "PLAYER") return node;
+    node = node.children.length === 1 ? node.children[0] : null;
+  }
+
+  // Legacy fixed opening: W[4] (2@0), then W[5] (2@1).
+  node = sgfRoot;
   let sawFirst = false;
   while (node) {
     if (node.actionPlayer === "W" && node.action === 4) {
@@ -772,6 +797,7 @@ function bootViewer() {
       const status = statusOf(node);
       const phase = phaseOf(node, state.searchRoot);
       const ttHit = isTtHit(node);
+      const symmetryTtHit = isSymmetryTtHit(node);
       const sourceId = ttSourceNodeIdOf(node);
       const traceId = traceNodeIdOf(node);
       const visitOrder = dfsVisitOrderOf(node);
@@ -786,7 +812,7 @@ function bootViewer() {
         "data-trace-node-id": traceId,
         "data-dfs-visit-order": visitOrder,
         "aria-current": node === selected ? "true" : "false",
-        "aria-label": `${visitLabel}, ${fullLabel}, ${phase}, ${status}${ttHit ? `, TT hit referencing node ${sourceId || "unknown"}` : ""}`,
+        "aria-label": `${visitLabel}, ${fullLabel}, ${phase}, ${status}${ttHit ? `, ${symmetryTtHit ? "symmetry " : ""}TT hit referencing node ${sourceId || "unknown"}` : ""}`,
       });
       group.appendChild(makeSvgElement("rect", {
         class: "node-body",
@@ -814,13 +840,14 @@ function bootViewer() {
       titleText.textContent = truncatedLabel(fullLabel);
       group.appendChild(titleText);
       const metaText = makeSvgElement("text", { class: "node-meta", x: 0, y: 18, "text-anchor": "middle" });
-      metaText.textContent = `${phase === "PLAYER" ? "OR" : "AND"} · ${status}${ttHit ? ` · TT→${sourceId || "?"}` : ""}`;
+      metaText.textContent = `${phase === "PLAYER" ? "OR" : "AND"} · ${status}${ttHit ? ` · ${symmetryTtHit ? "SYM " : ""}TT→${sourceId || "?"}` : ""}`;
       group.appendChild(metaText);
 
       const tooltip = makeSvgElement("title");
       const value = commentValue(node, "v");
       const siblingOrder = node.synthetic ? "skipped" : commentValue(node, "dfs_order") || "unknown";
-      tooltip.textContent = `${fullLabel}${traceId ? `\nnode id: ${traceId}` : ""}\nglobal DFS visit: ${node.synthetic ? "skipped" : visitOrder || "unknown"}\nsibling DFS order: ${siblingOrder}\n${phase} / ${phase === "PLAYER" ? "OR" : "AND"}\nstatus: ${status}\ndepth: ${relativeDepth(node, state.searchRoot)}${ttHit ? `\nTT HIT -> node ${sourceId || "unknown"}` : ""}${value ? `\nv: ${value}` : ""}`;
+      const transform = commentValue(node, "tt_transform");
+      tooltip.textContent = `${fullLabel}${traceId ? `\nnode id: ${traceId}` : ""}\nglobal DFS visit: ${node.synthetic ? "skipped" : visitOrder || "unknown"}\nsibling DFS order: ${siblingOrder}\n${phase} / ${phase === "PLAYER" ? "OR" : "AND"}\nstatus: ${status}\nsolved by: ${solvedByOf(node)}\ndepth: ${relativeDepth(node, state.searchRoot)}${ttHit ? `\n${symmetryTtHit ? "SYMMETRY " : ""}TT HIT -> node ${sourceId || "unknown"}${transform ? `\ntransform: ${transform}` : ""}` : ""}${value ? `\nv: ${value}` : ""}`;
       group.appendChild(tooltip);
 
       if (entry.hasChildren) {
@@ -951,6 +978,7 @@ function bootViewer() {
     const nonSyntheticChildren = selected.children.filter(child => !child.synthetic).length;
     const syntheticChildren = selected.children.filter(child => child.synthetic).length;
     const ttHit = isTtHit(selected);
+    const symmetryTtHit = isSymmetryTtHit(selected);
     const ttSourceId = ttSourceNodeIdOf(selected);
     const globalVisit = dfsVisitOrderOf(selected);
     const values = [
@@ -961,7 +989,10 @@ function bootViewer() {
       ["DFS depth", String(relativeDepth(selected, state.searchRoot))],
       ["Node type", `${phase} / ${phase === "PLAYER" ? "OR" : "AND"}`],
       ["Result", status],
+      ["Solved by", solvedByOf(selected)],
       ["TT reference", ttHit ? `HIT → #${ttSourceId || "?"}` : "no"],
+      ["TT symmetry hit", ttHit ? (symmetryTtHit ? "yes" : "no") : "—"],
+      ["TT transform", ttHit ? commentValue(selected, "tt_transform") : ""],
       ["V(afterstate)", commentValue(selected, "v")],
       ["Children total", stats.total || String(nonSyntheticChildren + syntheticChildren)],
       ["Expanded", stats.expanded || String(nonSyntheticChildren)],
@@ -971,8 +1002,11 @@ function bootViewer() {
     if (selected === state.searchRoot) {
       values.push(
         ["TT mode", commentValue(selected, "transposition_table")],
+        ["TT symmetry mode", commentValue(selected, "tt_symmetry")],
         ["Player TT hits", commentValue(selected, "player_tt_hits")],
         ["Environment TT hits", commentValue(selected, "environment_tt_hits")],
+        ["Player symmetry TT hits", commentValue(selected, "player_tt_symmetry_hits")],
+        ["Environment symmetry TT hits", commentValue(selected, "environment_tt_symmetry_hits")],
         ["Player TT entries", commentValue(selected, "player_tt_entries")],
         ["Environment TT entries", commentValue(selected, "environment_tt_entries")],
       );
@@ -1031,6 +1065,7 @@ function bootViewer() {
     const status = statusOf(selected);
     const traceId = traceNodeIdOf(selected);
     const ttHit = isTtHit(selected);
+    const symmetryTtHit = isSymmetryTtHit(selected);
     const sourceId = ttSourceNodeIdOf(selected);
     const sourceNode = ttSourceNode(selected);
     const globalVisit = dfsVisitOrderOf(selected);
@@ -1039,11 +1074,13 @@ function bootViewer() {
     elements.selectedStatus.textContent = status;
     elements.selectedStatus.className = `status-badge ${statusClass(status)}`;
     elements.ttReference.hidden = !ttHit;
-    elements.ttReference.textContent = sourceId ? `TT HIT → #${sourceId}` : "TT HIT";
+    elements.ttReference.textContent = sourceId
+      ? `${symmetryTtHit ? "SYMMETRY " : ""}TT HIT → #${sourceId}`
+      : `${symmetryTtHit ? "SYMMETRY " : ""}TT HIT`;
     elements.ttReference.className = `tt-reference${sourceNode ? "" : " unresolved"}`;
     elements.ttReference.setAttribute("aria-disabled", String(!sourceNode));
     elements.ttReference.title = sourceNode
-      ? `跳到 transposition table source node #${sourceId}`
+      ? `跳到 ${symmetryTtHit ? "symmetry " : ""}transposition table source node #${sourceId}`
       : `TT source node #${sourceId || "?"} 不在此 SGF tree 中`;
     elements.comment.textContent = selected.comment || "(no comment)";
     elements.toggleCurrent.textContent = expanded.has(selected) ? "收合目前節點" : "展開目前節點";
@@ -1270,11 +1307,13 @@ if (typeof module !== "undefined" && module.exports) {
     dfsVisitOrderOf,
     expandVisibleSubtreeBatch,
     findSearchRoot,
+    isSymmetryTtHit,
     isTtHit,
     layoutVisibleTree,
     materializeSkippedNodes,
     parseSgf,
     prepareSgf,
+    solvedByOf,
     statusOf,
     traceNodeIdOf,
     ttSourceNodeIdOf,
