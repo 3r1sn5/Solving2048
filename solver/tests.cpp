@@ -2,6 +2,7 @@
 #include "game_api.h"
 #include "search.h"
 #include "sgf.h"
+#include "tt_file.h"
 #include "../2048_api.h"
 
 #include <algorithm>
@@ -41,6 +42,8 @@ using solver2048::Solver;
 using solver2048::SolverOptions;
 using solver2048::TerminalReason;
 using solver2048::TraceNode;
+using solver2048::TtFile;
+using solver2048::TtFileSummary;
 
 [[noreturn]] void fail(const std::string& message)
 {
@@ -157,15 +160,23 @@ void checkTraceIdsAreDfsDiscoveryOrder(const TraceNode& root)
         if (node.tt_hit) {
             check(node.solved_by == SolvedBy::TranspositionTable,
                   "a TT hit TraceNode must be marked as solved by TT");
-            check(node.tt_source_trace_id.has_value(),
-                  "every TT hit must reference its source TraceNode");
-            check(*node.tt_source_trace_id < node.trace_id,
-                  "TT source ID must precede its hit in DFS discovery order");
-            check(discovered.count(*node.tt_source_trace_id) == 1,
-                  "TT source must already be discoverable earlier in the emitted tree");
+            check(node.tt_key.has_value(), "every TT hit must expose its table key");
+            if (node.tt_persistent_hit) {
+                check(!node.tt_source_trace_id,
+                      "a persistent TT hit must not reference a prior-run trace node");
+            } else {
+                check(node.tt_source_trace_id.has_value(),
+                      "a trace-local TT hit must reference its source TraceNode");
+                check(*node.tt_source_trace_id < node.trace_id,
+                      "TT source ID must precede its hit in DFS discovery order");
+                check(discovered.count(*node.tt_source_trace_id) == 1,
+                      "TT source must already be discoverable earlier in the emitted tree");
+            }
         } else {
             check(!node.tt_source_trace_id,
                   "a non-TT TraceNode must not carry a TT source reference");
+            check(!node.tt_persistent_hit && !node.tt_key,
+                  "a non-TT TraceNode must not carry persistent TT metadata");
         }
         if (node.terminal_reason == TerminalReason::WinningTile ||
             node.terminal_reason == TerminalReason::NoLegalMove) {
@@ -391,6 +402,9 @@ std::string validConfigText()
         "progress_interval=789\n"
         "use_transposition_table=TRUE\n"
         "use_tt_symmetry=1\n"
+        "load_tt=true\n"
+        "save_tt=false\n"
+        "tt_path=solver/tt/test-target16.tt\n"
         "opening=4@5, 2@0 # inline comment\n"
         "network=4x6patt\n"
         "model_path=models/4x6patt.w\n"
@@ -400,15 +414,17 @@ std::string validConfigText()
 void testSolverConfigParsingAndValidation()
 {
     const SolverConfig defaults = solver2048::loadSolverConfig("solver/solver.cfg");
-    check(defaults.winning_tile == 8 && defaults.node_limit == 0 &&
+    check(defaults.winning_tile == 16 && defaults.node_limit == 0 &&
               defaults.progress_interval == 100000,
           "default solver.cfg search settings mismatch");
     check(defaults.use_transposition_table && defaults.use_tt_symmetry,
           "default solver.cfg must enable exact TT and symmetry canonicalization");
+    check(!defaults.tt_path.empty(),
+          "default solver.cfg must provide a persistent TT path");
     check(solver2048::formatOpening(defaults.opening) == "2@0,2@1",
           "default solver.cfg opening mismatch");
     check(defaults.network == "4x6patt" && defaults.model_path == "models/4x6patt.w" &&
-              defaults.sgf_path == "solver/tree.sgf",
+              defaults.sgf_path == "result/16/16_ttfile.sgf",
           "default solver.cfg network/output settings mismatch");
 
     TemporaryConfigFile valid(validConfigText());
@@ -418,6 +434,9 @@ void testSolverConfigParsingAndValidation()
           "typed cfg unsigned parsing mismatch");
     check(parsed.use_transposition_table && parsed.use_tt_symmetry,
           "typed cfg bool parsing mismatch");
+    check(parsed.load_tt && !parsed.save_tt &&
+              parsed.tt_path == "solver/tt/test-target16.tt",
+          "persistent TT cfg parsing mismatch");
     check(parsed.opening[0] == 2 && parsed.opening[5] == 4 &&
               solver2048::formatOpening(parsed.opening) == "2@0,4@5",
           "cfg opening parsing or deterministic formatting mismatch");
@@ -437,6 +456,17 @@ void testSolverConfigParsingAndValidation()
     TemporaryConfigFile dependency(invalid_dependency);
     checkThrows([&] { (void)solver2048::loadSolverConfig(dependency.path); },
                 "TT symmetry without exact TT must be rejected in cfg");
+
+    std::string invalid_persistence = validConfigText();
+    invalid_persistence.replace(invalid_persistence.find(enabled), enabled.size(),
+                                "use_transposition_table=false");
+    const std::string symmetry_enabled = "use_tt_symmetry=1";
+    invalid_persistence.replace(
+        invalid_persistence.find(symmetry_enabled), symmetry_enabled.size(),
+        "use_tt_symmetry=false");
+    TemporaryConfigFile persistence_dependency(invalid_persistence);
+    checkThrows([&] { (void)solver2048::loadSolverConfig(persistence_dependency.path); },
+                "persistent TT load/save without exact TT must be rejected in cfg");
 
     std::string duplicate_opening = validConfigText();
     const std::string opening = "opening=4@5, 2@0 # inline comment";
@@ -832,6 +862,235 @@ void testNodeLimitReturnsUnknownForEveryAttemptedChild()
     }
 }
 
+struct TemporaryTtFile {
+    TemporaryTtFile()
+    {
+        static std::uint64_t sequence = 0;
+        const auto nonce = std::chrono::steady_clock::now().time_since_epoch().count();
+        path = std::filesystem::temp_directory_path() /
+               ("solving2048-tt-test-" + std::to_string(nonce) + "-" +
+                std::to_string(++sequence) + ".tt");
+    }
+
+    ~TemporaryTtFile()
+    {
+        std::error_code ignored;
+        std::filesystem::remove(path, ignored);
+        std::filesystem::remove(path.string() + ".tmp", ignored);
+    }
+
+    std::filesystem::path path;
+};
+
+std::uint8_t readByte(const std::filesystem::path& path, std::uint64_t offset)
+{
+    std::ifstream input(path, std::ios::in | std::ios::binary);
+    if (!input) fail("cannot open temporary TT file for byte read");
+    input.seekg(static_cast<std::streamoff>(offset));
+    char value = 0;
+    input.read(&value, 1);
+    if (!input) fail("cannot read byte from temporary TT file");
+    return static_cast<std::uint8_t>(value);
+}
+
+void writeByte(const std::filesystem::path& path, std::uint64_t offset, std::uint8_t value)
+{
+    std::fstream output(path, std::ios::in | std::ios::out | std::ios::binary);
+    if (!output) fail("cannot open temporary TT file for byte mutation");
+    output.seekp(static_cast<std::streamoff>(offset));
+    output.put(static_cast<char>(value));
+    if (!output) fail("cannot mutate byte in temporary TT file");
+}
+
+void testPersistentTtRoundTripAndCrossOpeningReuse()
+{
+    const SolverOptions options{8, 0, 0, true, false};
+    FakeGame first_game(1);
+    first_game.slides[1] = {
+        slide(Direction::Up, 10),
+        slide(Direction::Right, 11, 4),
+    };
+    first_game.values = {{10, 100.0}, {11, 50.0}};
+    first_game.placements[10] = {placement(0, 2, 20)};
+    first_game.placements[11] = {placement(0, 2, 21)};
+    first_game.winning_states.insert(21);
+
+    Solver first_solver(first_game, options);
+    const SearchResult first = first_solver.solve();
+    check(first.outcome == Outcome::Win && first.root_action == Direction::Right,
+          "first persistent-TT fixture must prove Win after rejecting a losing action");
+    check(first.statistics.player_tt_stores == 2 &&
+              first.statistics.environment_tt_stores == 2,
+          "first persistent-TT fixture must create all four outcome/phase record forms");
+
+    TemporaryTtFile temporary;
+    const TtFileSummary first_saved = TtFile::save(temporary.path, first_solver);
+    check(first_saved.player_entries == 2 && first_saved.environment_entries == 2 &&
+              first_saved.file_size == TtFile::kHeaderSize + 4 * TtFile::kRecordSize,
+          "persistent TT writer produced unexpected first snapshot counts or size");
+    check(std::filesystem::file_size(temporary.path) == first_saved.file_size &&
+              !std::filesystem::exists(temporary.path.string() + ".tmp"),
+          "atomic TT snapshot publication left an invalid size or temporary file");
+
+    FakeGame second_game(2);
+    second_game.slides[2] = {slide(Direction::Down, 12)};
+    second_game.values[12] = 10.0;
+    second_game.placements[12] = {placement(0, 2, 1)};
+    second_game.slides[1] = first_game.slides[1];
+    second_game.values[10] = 100.0;
+    second_game.values[11] = 50.0;
+
+    Solver second_solver(second_game, options);
+    const TtFileSummary loaded = TtFile::load(temporary.path, second_solver);
+    check(loaded.player_entries == 2 && loaded.environment_entries == 2 &&
+              loaded.payload_checksum == first_saved.payload_checksum,
+          "persistent TT round trip changed counts or checksum");
+    const SearchResult second = second_solver.solve();
+    check(second.outcome == Outcome::Win && second.root_action == Direction::Down,
+          "second opening must reuse the first opening proof and remain Win");
+    check(second.statistics.player_tt_loaded_entries == 2 &&
+              second.statistics.environment_tt_loaded_entries == 2,
+          "loaded TT entry counters are wrong");
+    check(second.statistics.player_persistent_tt_hits == 1 &&
+              second.statistics.environment_persistent_tt_hits == 0,
+          "second opening must record one persistent Player hit");
+    check(second.statistics.player_nodes == 1 && second.statistics.environment_nodes == 1,
+          "persistent Player hit must avoid expanding the reused subtree");
+
+    const TraceNode& environment = *second.root->children[0];
+    const TraceNode& persistent_hit = *environment.children[0];
+    check(persistent_hit.tt_hit && persistent_hit.tt_persistent_hit &&
+              persistent_hit.tt_key == std::optional<std::uint64_t>(1) &&
+              !persistent_hit.tt_source_trace_id,
+          "persistent trace leaf must use phase/key identity without a stale trace ID");
+    check(persistent_hit.selected_action &&
+              persistent_hit.selected_action->direction == Direction::Right &&
+              persistent_hit.selected_action_value == std::optional<double>(54.0),
+          "persistent Player witness or reward + V action value was not restored");
+
+    const TtFileSummary merged = TtFile::save(temporary.path, second_solver);
+    check(merged.player_entries == 3 && merged.environment_entries == 3,
+          "second opening must merge two new states into the persistent snapshot");
+
+    FakeGame third_game = second_game;
+    Solver third_solver(third_game, options);
+    (void)TtFile::load(temporary.path, third_solver);
+    const SearchResult third = third_solver.solve();
+    check(third.outcome == Outcome::Win && third.root_action == Direction::Down &&
+              third.root_action_value == std::optional<double>(10.0),
+          "merged persistent TT must restore a root witness and action value");
+    check(third.statistics.combinedNodes() == 0 &&
+              third.statistics.player_persistent_tt_hits == 1 &&
+              third.root->tt_persistent_hit,
+          "third solve must resolve its root directly from the persistent TT");
+    checkTraceIdsAreDfsDiscoveryOrder(*third.root);
+}
+
+void testPersistentTtRejectsIncompatibleAndCorruptFiles()
+{
+    const SolverOptions options{8, 0, 0, true, false};
+    FakeGame game(1);
+    game.slides[1] = {slide(Direction::Up, 10, 4)};
+    game.values[10] = 5.0;
+    game.winning_states.insert(10);
+
+    Solver source(game, options);
+    const SearchResult source_result = source.solve();
+    check(source_result.outcome == Outcome::Win, "corruption fixture must be a proven Win");
+    TemporaryTtFile temporary;
+    const TtFileSummary saved = TtFile::save(temporary.path, source);
+    check(saved.player_entries == 1 && saved.environment_entries == 0,
+          "corruption fixture must contain one Player record");
+
+    FakeGame wrong_target_game(1);
+    Solver wrong_target(wrong_target_game, SolverOptions{16, 0, 0, true, false});
+    checkThrows([&] { (void)TtFile::load(temporary.path, wrong_target); },
+                "persistent TT with a different winning tile must be rejected");
+
+    FakeGame wrong_symmetry_game(1);
+    Solver wrong_symmetry(wrong_symmetry_game, SolverOptions{8, 0, 0, true, true});
+    checkThrows([&] { (void)TtFile::load(temporary.path, wrong_symmetry); },
+                "persistent TT with a different symmetry mode must be rejected");
+
+    constexpr std::uint64_t first_record = TtFile::kHeaderSize;
+    const std::uint8_t original_witness = readByte(temporary.path, first_record + 9);
+    writeByte(temporary.path, first_record + 9, 42);
+    FakeGame invalid_witness_game(1);
+    Solver invalid_witness(invalid_witness_game, options);
+    checkThrows([&] { (void)TtFile::load(temporary.path, invalid_witness); },
+                "persistent TT with an illegal witness must be rejected");
+    writeByte(temporary.path, first_record + 9, original_witness);
+    const TtFileSummary recovered = TtFile::load(temporary.path, invalid_witness);
+    check(recovered.entries() == 1,
+          "failed TT load must not partially publish entries into the Solver");
+
+    const std::uint8_t original_key_byte = readByte(temporary.path, first_record);
+    writeByte(temporary.path, first_record, original_key_byte ^ 0x80u);
+    FakeGame checksum_game(1);
+    Solver checksum_solver(checksum_game, options);
+    checkThrows([&] { (void)TtFile::load(temporary.path, checksum_solver); },
+                "persistent TT payload checksum corruption must be rejected");
+    writeByte(temporary.path, first_record, original_key_byte);
+
+    std::filesystem::resize_file(temporary.path, saved.file_size - 1);
+    FakeGame truncated_game(1);
+    Solver truncated_solver(truncated_game, options);
+    checkThrows([&] { (void)TtFile::load(temporary.path, truncated_solver); },
+                "truncated persistent TT file must be rejected");
+}
+
+void testPersistentSymmetryWitnessMapping()
+{
+    const Board source = asymmetricBoard();
+    const Board canonical = solver2048::canonicalize(source).board;
+    std::uint8_t current_transform = 0;
+    Board current;
+    for (std::uint8_t transform = 0; transform < 8; ++transform) {
+        const Board candidate = solver2048::transformBoard(source, transform);
+        if (candidate != canonical) {
+            current_transform = transform;
+            current = candidate;
+            break;
+        }
+    }
+    check(current != canonical,
+          "persistent symmetry fixture requires a non-canonical current orientation");
+
+    const Board source_win = board(0x0000000000000022ull);
+    const Board current_win = solver2048::transformBoard(source_win, current_transform);
+    const Direction current_direction =
+        solver2048::transformDirection(Direction::Up, current_transform);
+    const SolverOptions options{8, 0, 0, true, true};
+
+    FakeGame source_game(source.raw);
+    source_game.slides[source.raw] = {slide(Direction::Up, source_win.raw, 4)};
+    source_game.values[source_win.raw] = 5.0;
+    source_game.winning_states.insert(source_win.raw);
+    Solver source_solver(source_game, options);
+    const SearchResult source_result = source_solver.solve();
+    check(source_result.outcome == Outcome::Win && source_result.root_action == Direction::Up,
+          "persistent symmetry source fixture must prove its slide witness");
+
+    TemporaryTtFile temporary;
+    (void)TtFile::save(temporary.path, source_solver);
+
+    FakeGame current_game(current.raw);
+    current_game.slides[current.raw] = {slide(current_direction, current_win.raw, 4)};
+    current_game.values[current_win.raw] = 7.0;
+    Solver current_solver(current_game, options);
+    (void)TtFile::load(temporary.path, current_solver);
+    const SearchResult current_result = current_solver.solve();
+    check(current_result.outcome == Outcome::Win &&
+              current_result.root_action == current_direction &&
+              current_result.root_action_value == std::optional<double>(11.0),
+          "persistent canonical witness must map back and recompute reward + V");
+    check(current_result.statistics.player_persistent_tt_hits == 1 &&
+              current_result.statistics.player_tt_symmetry_hits == 1 &&
+              current_result.root->tt_persistent_hit &&
+              current_result.root->tt_symmetry_hit,
+          "non-canonical persistent lookup must be classified as a symmetry hit");
+}
+
 void checkTiles(const std::array<unsigned, 16>& actual,
                 const std::array<unsigned, 16>& expected,
                 const std::string& message)
@@ -1225,6 +1484,11 @@ int main()
          testEnvironmentTranspositionHitAndOutcomeConsistency},
         {"Unknown outcomes are not cached", testUnknownOutcomesAreNotCached},
         {"combined node-limit Unknown semantics", testNodeLimitReturnsUnknownForEveryAttemptedChild},
+        {"persistent TT round trip and cross-opening reuse",
+         testPersistentTtRoundTripAndCrossOpeningReuse},
+        {"persistent TT compatibility and corruption rejection",
+         testPersistentTtRejectsIncompatibleAndCorruptFiles},
+        {"persistent TT symmetry witness mapping", testPersistentSymmetryWitnessMapping},
         {"real GameApi limited baseline and complete target-8 TT solve",
          testRealGameApiAndThreeNodeSearch},
         {"SGF action encoding, escaping, and order", testSgfActionEncodingEscapingAndOrder},

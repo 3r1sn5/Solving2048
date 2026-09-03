@@ -1,7 +1,6 @@
 #pragma once
 
 #include "game_api.h"
-
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -12,6 +11,8 @@
 #include <vector>
 
 namespace solver2048 {
+
+class TtFile;
 
 enum class Outcome {
     Win,
@@ -71,6 +72,8 @@ struct TraceNode {
     std::size_t dfs_order = 0;
     std::size_t children_total = 0;
     std::optional<std::uint64_t> tt_source_trace_id;
+    bool tt_persistent_hit = false;
+    std::optional<std::uint64_t> tt_key;
     bool tt_symmetry_hit = false;
     std::optional<std::uint8_t> tt_transform;
     std::optional<SearchAction> incoming_action;
@@ -95,12 +98,25 @@ struct SearchStatistics {
     std::uint64_t environment_tt_stores = 0;
     std::uint64_t player_tt_symmetry_hits = 0;
     std::uint64_t environment_tt_symmetry_hits = 0;
+    std::uint64_t player_persistent_tt_hits = 0;
+    std::uint64_t environment_persistent_tt_hits = 0;
+    std::uint64_t player_tt_loaded_entries = 0;
+    std::uint64_t environment_tt_loaded_entries = 0;
 
     std::uint64_t combinedNodes() const { return player_nodes + environment_nodes; }
     std::uint64_t ttHits() const { return player_tt_hits + environment_tt_hits; }
     std::uint64_t ttStores() const { return player_tt_stores + environment_tt_stores; }
     std::uint64_t ttSymmetryHits() const {
         return player_tt_symmetry_hits + environment_tt_symmetry_hits;
+    }
+    std::uint64_t persistentTtHits() const {
+        return player_persistent_tt_hits + environment_persistent_tt_hits;
+    }
+    std::uint64_t playerTtEntries() const {
+        return player_tt_loaded_entries + player_tt_stores;
+    }
+    std::uint64_t environmentTtEntries() const {
+        return environment_tt_loaded_entries + environment_tt_stores;
     }
     std::uint64_t playerTtExactHits() const { return player_tt_hits - player_tt_symmetry_hits; }
     std::uint64_t environmentTtExactHits() const {
@@ -132,6 +148,8 @@ public:
     SearchResult solve();
 
 private:
+    friend class TtFile;
+
     struct OrderedSlide {
         SlideResult slide;
         double afterstate_value = 0;
@@ -145,6 +163,7 @@ private:
         std::optional<SearchAction> selected_action;
         std::optional<double> selected_action_value;
         std::uint8_t source_transform = 0;
+        bool persistent = false;
     };
 
     Outcome solvePlayer(Board board, TraceNode& trace);
@@ -165,6 +184,8 @@ private:
     ProgressCallback progress_;
     SearchStatistics statistics_;
     std::uint64_t next_trace_id_ = 0;
+    bool solve_started_ = false;
+    bool solve_finished_ = false;
     std::unordered_map<std::uint64_t, TranspositionEntry> player_tt_;
     std::unordered_map<std::uint64_t, TranspositionEntry> environment_tt_;
 };

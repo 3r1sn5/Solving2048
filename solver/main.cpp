@@ -2,12 +2,14 @@
 #include "game_api.h"
 #include "search.h"
 #include "sgf.h"
+#include "tt_file.h"
 
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
 #include <iomanip>
 #include <iostream>
+#include <optional>
 #include <stdexcept>
 #include <string>
 
@@ -60,9 +62,12 @@ CommandLine parseCommandLine(int argc, char** argv)
         const std::string option = argv[index];
         const bool takes_value = option == "--config" || option == "--winning-tile" ||
                                  option == "--node-limit" || option == "--progress-interval" ||
-                                 option == "--network" || option == "--model" || option == "--sgf";
+                                 option == "--network" || option == "--model" || option == "--sgf" ||
+                                 option == "--tt-file";
         const bool is_flag = option == "--tt" || option == "--no-tt" ||
-                             option == "--tt-symmetry" || option == "--no-tt-symmetry";
+                             option == "--tt-symmetry" || option == "--no-tt-symmetry" ||
+                             option == "--load-tt" || option == "--no-load-tt" ||
+                             option == "--save-tt" || option == "--no-save-tt";
         if (!takes_value && !is_flag) throw std::invalid_argument("unknown option: " + option);
         if (!takes_value) continue;
         if (++index >= argc) throw std::invalid_argument("missing value after " + option);
@@ -95,10 +100,22 @@ CommandLine parseCommandLine(int argc, char** argv)
             command.settings.use_transposition_table = true;
         } else if (option == "--no-tt") {
             command.settings.use_transposition_table = false;
+            command.settings.load_tt = false;
+            command.settings.save_tt = false;
         } else if (option == "--tt-symmetry") {
             command.settings.use_tt_symmetry = true;
         } else if (option == "--no-tt-symmetry") {
             command.settings.use_tt_symmetry = false;
+        } else if (option == "--load-tt") {
+            command.settings.load_tt = true;
+        } else if (option == "--no-load-tt") {
+            command.settings.load_tt = false;
+        } else if (option == "--save-tt") {
+            command.settings.save_tt = true;
+        } else if (option == "--no-save-tt") {
+            command.settings.save_tt = false;
+        } else if (option == "--tt-file") {
+            command.settings.tt_path = nextValue();
         } else if (option == "--network") {
             command.settings.network = nextValue();
         } else if (option == "--model") {
@@ -124,11 +141,15 @@ void printHelp(const char* program)
         << "  --tt / --no-tt         Override exact transposition-table mode\n"
         << "  --tt-symmetry           Canonicalize TT keys over all 8 D4 symmetries\n"
         << "  --no-tt-symmetry        Use exact board orientation\n"
+        << "  --load-tt / --no-load-tt  Load or skip the persistent TT snapshot\n"
+        << "  --save-tt / --no-save-tt  Save or skip the merged persistent TT snapshot\n"
+        << "  --tt-file PATH          Override persistent TT file path\n"
         << "  --network NAME         Override N-tuple network\n"
         << "  --model PATH           Override N-tuple weight file\n"
         << "  --sgf PATH             Override final SGF output path\n"
         << "  -h, --help             Show this help\n\n"
-        << "With no options, all runtime settings are loaded from the default cfg.\n";
+        << "With no options, all runtime settings are loaded from the default cfg.\n"
+        << "A persistent TT file must match the selected winning tile and symmetry mode.\n";
 }
 
 void printBoard(const std::array<unsigned, 16>& tiles)
@@ -174,11 +195,14 @@ int main(int argc, char** argv)
                   << "transposition table: " << (settings.use_transposition_table ? "enabled" : "disabled") << '\n'
                   << "TT symmetry canonicalization: "
                   << (settings.use_tt_symmetry ? "enabled" : "disabled") << '\n'
+                  << "persistent TT load: " << (settings.load_tt ? "enabled" : "disabled") << '\n'
+                  << "persistent TT save: " << (settings.save_tt ? "enabled" : "disabled") << '\n'
+                  << "TT file: " << settings.tt_path.string() << '\n'
                   << "network: " << settings.network << '\n'
                   << "model: " << settings.model_path << '\n'
                   << "SGF output: " << settings.sgf_path.string() << '\n';
 
-        const auto started = std::chrono::steady_clock::now();
+        auto started = std::chrono::steady_clock::now();
         Solver solver(game, options, [&](const SearchStatistics& statistics) {
             const auto elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
             std::cerr << "progress: nodes=" << statistics.combinedNodes()
@@ -187,14 +211,57 @@ int main(int argc, char** argv)
                       << " tt_hits=" << statistics.ttHits()
                       << " elapsed=" << std::fixed << std::setprecision(3) << elapsed << "s\n";
         });
+        std::optional<TtFileSummary> loaded_tt;
+        if (settings.load_tt) {
+            std::error_code exists_error;
+            const bool exists = std::filesystem::exists(settings.tt_path, exists_error);
+            if (exists_error) {
+                throw std::runtime_error("cannot inspect TT file: " + exists_error.message());
+            }
+            if (exists) {
+                if (!std::filesystem::is_regular_file(settings.tt_path)) {
+                    throw std::runtime_error("TT path is not a regular file: " +
+                                             settings.tt_path.string());
+                }
+                const auto load_started = std::chrono::steady_clock::now();
+                loaded_tt = TtFile::load(settings.tt_path, solver);
+                const double load_elapsed = std::chrono::duration<double>(
+                    std::chrono::steady_clock::now() - load_started).count();
+                std::cout << "loaded persistent TT: player=" << loaded_tt->player_entries
+                          << " environment=" << loaded_tt->environment_entries
+                          << " elapsed=" << std::fixed << std::setprecision(6)
+                          << load_elapsed << "s\n";
+            } else {
+                std::cout << "persistent TT file not found; starting with empty tables\n";
+            }
+        }
+        started = std::chrono::steady_clock::now();
         SearchResult result = solver.solve();
         const double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
 
+        std::optional<TtFileSummary> saved_tt;
+        double save_elapsed = 0;
+        if (settings.save_tt) {
+            const auto save_started = std::chrono::steady_clock::now();
+            saved_tt = TtFile::save(settings.tt_path, solver);
+            save_elapsed = std::chrono::duration<double>(
+                std::chrono::steady_clock::now() - save_started).count();
+        }
         SgfMetadata metadata;
         metadata.winning_tile = settings.winning_tile;
         metadata.node_limit = settings.node_limit;
         metadata.use_transposition_table = settings.use_transposition_table;
         metadata.use_tt_symmetry = settings.use_tt_symmetry;
+        metadata.load_tt = settings.load_tt;
+        metadata.save_tt = settings.save_tt;
+        metadata.tt_path = settings.tt_path;
+        if (saved_tt) {
+            metadata.tt_format_version = TtFile::kFormatVersion;
+            metadata.tt_payload_checksum = saved_tt->payload_checksum;
+            metadata.tt_file_size = saved_tt->file_size;
+            metadata.tt_player_records = saved_tt->player_entries;
+            metadata.tt_environment_records = saved_tt->environment_entries;
+        }
         metadata.network = settings.network;
         metadata.model_path = settings.model_path;
         metadata.elapsed_seconds = elapsed;
@@ -229,8 +296,26 @@ int main(int argc, char** argv)
                       << result.statistics.player_tt_symmetry_hits << '\n'
                       << "environment symmetry-derived TT hits: "
                       << result.statistics.environment_tt_symmetry_hits << '\n'
-                      << "player TT entries: " << result.statistics.player_tt_stores << '\n'
-                      << "environment TT entries: " << result.statistics.environment_tt_stores << '\n';
+                      << "player persistent TT hits: "
+                      << result.statistics.player_persistent_tt_hits << '\n'
+                      << "environment persistent TT hits: "
+                      << result.statistics.environment_persistent_tt_hits << '\n'
+                      << "player TT loaded entries: "
+                      << result.statistics.player_tt_loaded_entries << '\n'
+                      << "environment TT loaded entries: "
+                      << result.statistics.environment_tt_loaded_entries << '\n'
+                      << "player TT new entries: " << result.statistics.player_tt_stores << '\n'
+                      << "environment TT new entries: "
+                      << result.statistics.environment_tt_stores << '\n'
+                      << "player TT entries: " << result.statistics.playerTtEntries() << '\n'
+                      << "environment TT entries: "
+                      << result.statistics.environmentTtEntries() << '\n';
+        }
+        if (saved_tt) {
+            std::cout << "saved persistent TT: entries=" << saved_tt->entries()
+                      << " bytes=" << saved_tt->file_size
+                      << " checksum=0x" << std::hex << saved_tt->payload_checksum << std::dec
+                      << " elapsed=" << std::fixed << std::setprecision(6) << save_elapsed << "s\n";
         }
         std::cout << "search elapsed: " << elapsed << "s\n"
                   << "SGF output: " << settings.sgf_path.string() << '\n';

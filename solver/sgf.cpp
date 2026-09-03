@@ -37,6 +37,12 @@ std::string nodeComment(const TraceNode& node, const SgfMetadata* metadata)
 
     if (node.tt_hit) {
         comment << "tt_hit = true\n";
+        comment << "tt_source = " << (node.tt_persistent_hit ? "persistent" : "trace") << '\n';
+        comment << "tt_phase = " << phaseName(node.phase) << '\n';
+        if (node.tt_key) {
+            comment << "tt_key = 0x" << std::hex << std::setw(16) << std::setfill('0')
+                    << *node.tt_key << std::dec << std::setfill(' ') << '\n';
+        }
         comment << "tt_symmetry_hit = " << (node.tt_symmetry_hit ? "true" : "false") << '\n';
         if (node.tt_transform) {
             comment << "tt_transform = " << static_cast<unsigned>(*node.tt_transform)
@@ -75,6 +81,11 @@ std::string nodeComment(const TraceNode& node, const SgfMetadata* metadata)
                 << (metadata->use_transposition_table ? "enabled" : "disabled")
                 << '\n' << "tt_symmetry = "
                 << (metadata->use_tt_symmetry ? "enabled" : "disabled")
+                << '\n' << "persistent_tt_load = "
+                << (metadata->load_tt ? "enabled" : "disabled")
+                << '\n' << "persistent_tt_save = "
+                << (metadata->save_tt ? "enabled" : "disabled")
+                << '\n' << "tt_file = " << metadata->tt_path.string()
                 << '\n' << "config_file = " << metadata->config_path.string()
                 << '\n' << "network = " << metadata->network
                 << '\n' << "model = " << metadata->model_path
@@ -94,8 +105,37 @@ std::string nodeComment(const TraceNode& node, const SgfMetadata* metadata)
                 << metadata->statistics.player_tt_symmetry_hits
                 << '\n' << "environment_tt_symmetry_hits = "
                 << metadata->statistics.environment_tt_symmetry_hits
-                << '\n' << "player_tt_entries = " << metadata->statistics.player_tt_stores
-                << '\n' << "environment_tt_entries = " << metadata->statistics.environment_tt_stores;
+                << '\n' << "player_persistent_tt_hits = "
+                << metadata->statistics.player_persistent_tt_hits
+                << '\n' << "environment_persistent_tt_hits = "
+                << metadata->statistics.environment_persistent_tt_hits
+                << '\n' << "player_tt_loaded_entries = "
+                << metadata->statistics.player_tt_loaded_entries
+                << '\n' << "environment_tt_loaded_entries = "
+                << metadata->statistics.environment_tt_loaded_entries
+                << '\n' << "player_tt_new_entries = " << metadata->statistics.player_tt_stores
+                << '\n' << "environment_tt_new_entries = "
+                << metadata->statistics.environment_tt_stores
+                << '\n' << "player_tt_entries = " << metadata->statistics.playerTtEntries()
+                << '\n' << "environment_tt_entries = "
+                << metadata->statistics.environmentTtEntries();
+        if (metadata->tt_format_version) {
+            comment << '\n' << "tt_format_version = " << *metadata->tt_format_version;
+        }
+        if (metadata->tt_payload_checksum) {
+            comment << '\n' << "tt_payload_checksum = 0x" << std::hex << std::setw(16)
+                    << std::setfill('0') << *metadata->tt_payload_checksum << std::dec
+                    << std::setfill(' ');
+        }
+        if (metadata->tt_file_size) {
+            comment << '\n' << "tt_file_size = " << *metadata->tt_file_size;
+        }
+        if (metadata->tt_player_records) {
+            comment << '\n' << "tt_player_records = " << *metadata->tt_player_records;
+        }
+        if (metadata->tt_environment_records) {
+            comment << '\n' << "tt_environment_records = " << *metadata->tt_environment_records;
+        }
     }
     return comment.str();
 }

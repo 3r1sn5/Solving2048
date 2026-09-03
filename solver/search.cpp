@@ -62,10 +62,12 @@ Solver::Solver(const Game& game, SolverOptions options, ProgressCallback progres
 
 SearchResult Solver::solve()
 {
+    if (solve_started_) throw std::logic_error("a Solver instance can only solve once");
+    solve_started_ = true;
     statistics_ = {};
+    statistics_.player_tt_loaded_entries = player_tt_.size();
+    statistics_.environment_tt_loaded_entries = environment_tt_.size();
     next_trace_id_ = 0;
-    player_tt_.clear();
-    environment_tt_.clear();
     auto root = std::make_unique<TraceNode>();
     root->phase = Phase::Player;
     root->dfs_order = 0;
@@ -78,6 +80,7 @@ SearchResult Solver::solve()
         result.root_action_value = root->selected_action_value;
     }
     result.root = std::move(root);
+    solve_finished_ = true;
     return result;
 }
 
@@ -124,13 +127,17 @@ bool Solver::lookupPlayerTransposition(Board board, TraceNode& trace)
         throw std::logic_error("Player TT contained an inexact Unknown entry");
     }
     ++statistics_.player_tt_hits;
-    const bool symmetry_hit = options_.use_tt_symmetry && entry.source_transform != key.transform;
+    if (entry.persistent) ++statistics_.player_persistent_tt_hits;
+    const bool symmetry_hit = options_.use_tt_symmetry &&
+        (entry.persistent ? key.transform != 0 : entry.source_transform != key.transform);
     if (symmetry_hit) ++statistics_.player_tt_symmetry_hits;
     trace.outcome = entry.outcome;
     trace.terminal_reason = TerminalReason::TranspositionTable;
     trace.solved_by = SolvedBy::TranspositionTable;
     trace.tt_hit = true;
-    trace.tt_source_trace_id = entry.source_trace_id;
+    trace.tt_persistent_hit = entry.persistent;
+    trace.tt_key = key.board.raw;
+    if (!entry.persistent) trace.tt_source_trace_id = entry.source_trace_id;
     trace.tt_symmetry_hit = symmetry_hit;
     if (options_.use_tt_symmetry) trace.tt_transform = key.transform;
     trace.children_total = entry.children_total;
@@ -138,7 +145,7 @@ bool Solver::lookupPlayerTransposition(Board board, TraceNode& trace)
         trace.selected_action = transformAction(*entry.selected_action, inverseTransform(key.transform));
     }
     trace.selected_action_value = entry.selected_action_value;
-    if (symmetry_hit && trace.selected_action &&
+    if ((entry.persistent || symmetry_hit) && trace.selected_action &&
         trace.selected_action->kind == SearchAction::Kind::Slide) {
         trace.selected_action_value =
             selectedSlideActionValue(board, trace.selected_action->direction);
@@ -158,13 +165,17 @@ bool Solver::lookupEnvironmentTransposition(Board afterstate, TraceNode& trace)
         throw std::logic_error("Environment TT contained an inexact Unknown entry");
     }
     ++statistics_.environment_tt_hits;
-    const bool symmetry_hit = options_.use_tt_symmetry && entry.source_transform != key.transform;
+    if (entry.persistent) ++statistics_.environment_persistent_tt_hits;
+    const bool symmetry_hit = options_.use_tt_symmetry &&
+        (entry.persistent ? key.transform != 0 : entry.source_transform != key.transform);
     if (symmetry_hit) ++statistics_.environment_tt_symmetry_hits;
     trace.outcome = entry.outcome;
     trace.terminal_reason = TerminalReason::TranspositionTable;
     trace.solved_by = SolvedBy::TranspositionTable;
     trace.tt_hit = true;
-    trace.tt_source_trace_id = entry.source_trace_id;
+    trace.tt_persistent_hit = entry.persistent;
+    trace.tt_key = key.board.raw;
+    if (!entry.persistent) trace.tt_source_trace_id = entry.source_trace_id;
     trace.tt_symmetry_hit = symmetry_hit;
     if (options_.use_tt_symmetry) trace.tt_transform = key.transform;
     trace.children_total = entry.children_total;

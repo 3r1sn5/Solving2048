@@ -10,8 +10,8 @@ SOURCE ?= 2048.cpp
 OUTPUT ?= $(basename $(word 1, $(SOURCE)))
 SOLVER_OUTPUT ?= solver/solver2048
 SOLVER_TEST_OUTPUT ?= solver/solver_tests
-SOLVER_SOURCES := solver/main.cpp solver/config.cpp solver/game_api.cpp solver/search.cpp solver/sgf.cpp 2048.cpp
-SOLVER_TEST_SOURCES := solver/tests.cpp solver/config.cpp solver/game_api.cpp solver/search.cpp solver/sgf.cpp 2048.cpp
+SOLVER_SOURCES := solver/main.cpp solver/config.cpp solver/game_api.cpp solver/search.cpp solver/sgf.cpp solver/tt_file.cpp 2048.cpp
+SOLVER_TEST_SOURCES := solver/tests.cpp solver/config.cpp solver/game_api.cpp solver/search.cpp solver/sgf.cpp solver/tt_file.cpp 2048.cpp
 # other make options
 TARGET ?= default
 SCRIPT ?= make-profile.sh

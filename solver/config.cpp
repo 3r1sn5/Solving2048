@@ -122,6 +122,12 @@ void validateSolverConfig(const SolverConfig& value)
     if (value.use_tt_symmetry && !value.use_transposition_table) {
         throw std::invalid_argument("use_tt_symmetry=true requires use_transposition_table=true");
     }
+    if ((value.load_tt || value.save_tt) && !value.use_transposition_table) {
+        throw std::invalid_argument("load_tt/save_tt require use_transposition_table=true");
+    }
+    if ((value.load_tt || value.save_tt) && value.tt_path.empty()) {
+        throw std::invalid_argument("tt_path cannot be empty when persistent TT is enabled");
+    }
     std::size_t opening_tiles = 0;
     for (const unsigned tile : value.opening) {
         if (tile == 0) continue;
@@ -151,6 +157,9 @@ SolverConfig loadSolverConfig(const std::filesystem::path& path)
         "progress_interval",
         "use_transposition_table",
         "use_tt_symmetry",
+        "load_tt",
+        "save_tt",
+        "tt_path",
         "opening",
         "network",
         "model_path",
@@ -194,6 +203,12 @@ SolverConfig loadSolverConfig(const std::filesystem::path& path)
             result.use_transposition_table = parseBool(value, path, line_number, key);
         } else if (key == "use_tt_symmetry") {
             result.use_tt_symmetry = parseBool(value, path, line_number, key);
+        } else if (key == "load_tt") {
+            result.load_tt = parseBool(value, path, line_number, key);
+        } else if (key == "save_tt") {
+            result.save_tt = parseBool(value, path, line_number, key);
+        } else if (key == "tt_path") {
+            result.tt_path = value;
         } else if (key == "opening") {
             result.opening = parseOpening(value, path, line_number);
         } else if (key == "network") {

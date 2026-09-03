@@ -1,0 +1,320 @@
+2048 Solver Persistent TT File 規格
+==================================
+
+文件狀態
+--------
+
+本文件整理 persistent transposition table（以下簡稱 persistent TT）的第一版實作規格。
+Binary writer/reader、Solver load/merge/save、cfg/CLI、persistent SGF reference 與自動測試
+已實作；Proof Checker、checkpoint、compression、mmap、sorted records 與 multi-process
+writer 仍是後續工作。
+
+
+1. 目標與責任
+-------------
+
+persistent TT 是同一組遊戲規則下，可由不同固定開局共同使用、逐次擴充的 exact solved-state
+database。它的主要用途是：
+
+- Solver 啟動時載入既有 exact Win/Loss，避免重新證明相同 `(board, phase)`。
+- Solver 結束後把本次新增的 exact entries 合併並安全寫回檔案。
+- 提供 Proof Checker 解析 TT hit、補完 SGF 未展開 subtree，以及獨立驗證 root proof。
+- 讓 target 8、target 16 等不同問題各自累積可重複使用的資料庫。
+
+persistent TT 不負責保存某次 DFS 的完整過程。DFS traverse order、source trace node、
+solved_by、value ordering 等單次執行資訊仍由 SGF 保存。
+
+
+2. TT 的邏輯模型
+----------------
+
+TT 仍分成兩個 phase，不能只以 board key 區分：
+
+    Player TT:      canonical(Player board) -> exact Player outcome
+    Environment TT: canonical(afterstate)   -> exact Environment outcome
+
+原因是相同 raw board 在 Player OR node 與 Environment AND node 表示不同命題。
+
+Outcome 固定採 Player 視角：
+
+- Win：Player 能強制到達 winning tile。
+- Loss：Environment 能阻止 Player 到達 winning tile。
+- Unknown：尚未完成證明；永遠不得寫入 persistent TT。
+
+只有完成 exact backup 的 Win/Loss entry 可以存檔。即使某次 root 因 node limit 回傳
+Unknown，本次搜尋中已經完成證明的其他 entries 仍是有效 exact result，可以加入
+persistent TT。
+
+
+3. 跨開局共用的相容性邊界
+--------------------------
+
+TT file 不綁定單一 opening、root board 或 root outcome。這些資料屬於某次 solve，應記錄
+在該次 SGF，而不是作為 persistent TT 的 identity。
+
+下列規則會改變 state outcome，必須記錄在 TT header 並完全相容才可載入：
+
+    board dimensions             = 4x4
+    board encoding               = packed 4-bit tile exponents
+    winning tile                 = 8 / 16 / ...
+    winning predicate            = 目前 Solver 採用的 winning-tile 判定版本
+    Player semantics             = OR over every legal slide
+    Environment semantics        = adversarial AND over every legal placement
+    spawn tiles                  = 2 and 4
+    placement enumeration        = every empty position, both tile values
+    symmetry mode                = NONE 或 D4_MIN_RAW_V1
+    file/rules version           = 明確的版本號
+
+不同 winning tile 的 TT 不可混用。例如 target 8 與 target 16 應使用不同檔案。
+
+下列設定只影響搜尋順序、資源上限或輸出，不影響 exact outcome，因此不需要成為 TT
+相容性條件：
+
+- 固定開局。
+- N-tuple network 名稱與 model path。
+- V(afterstate) 與 Player action ordering。
+- node limit、progress interval。
+- SGF path 與 viewer 設定。
+
+
+4. D4 symmetry 與 persistent key
+-------------------------------
+
+啟用 symmetry 時沿用目前 Solver 的 canonicalization：
+
+    S(board) = board 的四種旋轉與四種 reflection+rotation
+    canonical(board) = min(raw(x) for x in S(board))
+
+若多個 transform 得到相同 minimum，固定選 transform id 最小者。Header 必須記錄
+canonicalization convention，例如：
+
+    D4_MIN_RAW_V1
+
+每個 orbit 只保存一筆 canonical board，不保存八種版本。Lookup 時 canonicalize 目前
+盤面，然後只執行一次 table lookup。
+
+具有方向的 existential witness 必須保存成 canonical orientation：
+
+- Player Win：一個能得到 Win 的 slide direction。
+- Environment Loss：一個能得到 Loss 的 `(position, tile)` placement。
+
+Lookup 後使用目前盤面的 `current -> canonical` transform 之 inverse，把 witness 映射回
+目前 orientation。Persistent record 不需要保存來源盤面的 transform id。
+
+
+5. Entry 必須與不得保存的資料
+--------------------------------
+
+每筆 record 至少保存：
+
+    board_key          canonical raw board，uint64
+    outcome            Win 或 Loss
+    witness_action     existential proof 使用；沒有則 NONE
+    children_total     完整 legal action 數，作為額外一致性檢查
+    flags/reserved     格式擴充用
+
+Witness 規則：
+
+    Player Win          必須有一個 slide witness
+    Player Loss         不需要 witness；它是 universal proof
+    Environment Win     不需要 witness；它是 universal proof
+    Environment Loss    必須有一個 placement witness
+
+Proof Checker 不得只相信 `children_total`；它仍要根據盤面重新列舉合法 actions。
+
+下列資料不可持久化：
+
+- `source_trace_id`：只在當次 SGF 中有效。
+- `selected_action_value = reward + V(afterstate)`：依賴 model，且只影響 ordering/顯示，
+  不影響 exact proof。
+- pointer、unordered_map bucket、allocator 或任何 STL internal state。
+- DFS visit order、cache hit counters、expanded node counters。
+- Unknown outcome。
+
+
+6. Binary file format
+---------------------
+
+第一版使用自訂、版本化、little-endian binary snapshot，不使用 JSON、文字逐行格式、SQLite，
+也不直接 dump C++ struct 或 `std::unordered_map` 記憶體。
+
+整體 layout：
+
+    +------------------------------+
+    | Fixed-size/versioned header  |
+    +------------------------------+
+    | Player TT records            |
+    +------------------------------+
+    | Environment TT records       |
+    +------------------------------+
+
+第一版 header 固定 128 bytes：
+
+    offset 0    magic                         8 bytes："S2048TT" 加一個 NUL
+    offset 8    format_version                uint16 = 1
+    offset 10   header_size                   uint16 = 128
+    offset 12   record_size                   uint16 = 16
+    offset 14   flags                         uint16；bit 0 = D4 symmetry
+    offset 16   byte_order                    uint32 = 0x01020304
+    offset 20   rules_version                 uint32 = 1
+    offset 24   board_encoding_version        uint32 = 1
+    offset 28   winning_tile                  uint32
+    offset 32   Player section offset         uint64
+    offset 40   Player record count           uint64
+    offset 48   Environment section offset    uint64
+    offset 56   Environment record count      uint64
+    offset 64   payload_size                  uint64
+    offset 72   payload CRC64-ECMA            uint64
+    offset 80   checksum algorithm id         uint32 = 1
+    offset 84   reserved                      44 bytes，必須全為 0
+
+Header 不保存固定 opening 作為相容性條件，也不宣稱某個 root 已被證明。某次 root 的
+opening、result 與 proof 狀態由 SGF/Proof Checker 管理。
+
+第一版固定 16-byte record：
+
+    board_key          uint64
+    outcome            uint8
+    witness_action     uint8
+    children_total     uint8
+    flags              uint8
+    reserved           uint32
+
+這是 on-disk 欄位定義，不可直接 `fwrite(sizeof(C++ struct))`。Writer/reader 必須逐欄位
+encode/decode，明確處理大小、endianness 與 reserved bits。
+
+Action encoding 沿用 SGF：
+
+    0..3      Player slide：up, right, down, left
+    4..19     Environment placement tile 2：4 + position
+    20..35    Environment placement tile 4：20 + position
+    255       NONE
+
+Player 與 Environment 使用兩個 section，所以 record 本身不一定需要 phase byte。Reader
+仍必須把 section identity 納入 lookup key。
+
+
+7. Snapshot 寫入方式
+--------------------
+
+第一版不是「每產生一筆 TT 就立刻 append 到檔案」。搜尋期間仍以記憶體中的 hash table
+提供 lookup；搜尋結束後才逐筆串流輸出完整 snapshot：
+
+    solve
+      -> merge loaded entries and newly solved entries in memory
+      -> open `<tt_path>.tmp`
+      -> write provisional header
+      -> iterate Player TT and encode records
+      -> iterate Environment TT and encode records
+      -> finalize counts/checksum/header
+      -> flush and close
+      -> optionally reopen and perform integrity check
+      -> atomically rename to `<tt_path>`
+
+「串流輸出」表示不建立第二份完整 serialized buffer。可使用 1--8 MiB output buffer 批次
+寫入；不要求每筆 record 產生一次 OS write syscall。
+
+不得直接覆寫正式檔案。Process crash、disk full 或 checksum 失敗時保留舊 snapshot，未完成
+的 `.tmp` 不得被當成有效 TT。
+
+第一版直接遍歷 unordered_map，records 不排序，以避免為數百萬 entries 建立額外排序
+buffer。缺點是 binary output 不保證 byte-for-byte deterministic。未來若需要 mmap、binary
+search 或 reproducible files，可新增另一個 sorted format version，不可默默改變 v1。
+
+
+8. 載入、合併與更新
+--------------------
+
+Solver 載入 persistent TT 時必須先完成：
+
+1. 檢查 magic、版本、檔案大小與 section boundaries。
+2. 驗證 checksum。
+3. 驗證 rules/winning tile/symmetry compatibility。
+4. 驗證每個 outcome、action encoding、reserved bits 與 canonical key。
+5. 拒絕同一 `(phase, key)` 的 conflicting duplicate。
+6. 成功後才發布到 Solver 使用的 in-memory table。
+
+本次新證明的 entry 與舊 entry 合併時：
+
+- 相同 key、相同 outcome：可以保留舊 witness，或採明確且 deterministic 的 witness 規則。
+- 相同 key、相反 outcome：這代表 solver、檔案或規則有嚴重錯誤，必須停止並回報，不能覆蓋。
+- 新 key：加入 table。
+- Unknown：忽略，不得寫入。
+
+第一版可將整份檔案載入 `unordered_map`。這會比 on-disk 16-byte records 使用更多 RAM；
+若資料庫日後過大，再考慮「sorted mmap read-only base + in-memory delta」等架構。
+
+第一版不支援多個 Solver process 同時寫同一個 TT file。未來若需要 concurrency，必須加入
+file lock、generation check 或獨立 merge tool，不能讓 last writer 靜默覆蓋另一個 process
+新增的 entries。
+
+
+9. TT 與 SGF 的連結
+-------------------
+
+跨執行的 SGF TT hit 不可只依靠 `tt_source_node_id`。Persistent hit 至少記錄：
+
+    solved_by = TT
+    tt_source = persistent
+    tt_phase = PLAYER | ENVIRONMENT
+    tt_key = canonical uint64
+    solver_status = WIN | LOSS
+    tt_transform = current board -> canonical board
+
+若 entry 同時在本次 trace 中有來源 node，可以另外保存 `tt_source_node_id` 供 viewer 跳轉，
+但 Proof Checker 必須以 `(tt_phase, tt_key)` 查詢 persistent TT；trace id 不是永久 identity。
+
+角色分工：
+
+    `.tt`     跨開局 exact solved-state database，可載入與擴充
+    `.sgf`    單次 solve 的 opening、DFS trace、back propagation 與 TT hit
+    checker   同時驗證 TT integrity、SGF trace，以及 root AND/OR proof
+
+
+10. 建議設定與 CLI
+------------------
+
+solver.cfg 已使用：
+
+    load_tt=true
+    save_tt=true
+    tt_path=solver/tt/target16.tt
+
+Proof Checker 階段預計再加入：
+
+    verify_after_solve=true
+    verify_all_tt_entries=false
+
+其中 `verify_after_solve` 與 `verify_all_tt_entries` 尚未實作，留給 Proof Checker 階段。
+目前已實作 `load_tt`、`save_tt`、`tt_path`，以及對應的 `--load-tt`、`--no-load-tt`、
+`--save-tt`、`--no-save-tt`、`--tt-file PATH`。`load_tt=true` 但檔案尚不存在時會明確輸出
+訊息並從空 table 開始；其他開檔、格式或相容性錯誤不會被忽略。
+
+CLI 已能覆寫 load/save/path；未來 checker CLI 也應能覆寫 verification，但不可在規則
+不相容時強制載入。
+
+
+11. 初版規模預估
+-----------------
+
+固定 16-byte records、不含 hash-table RAM overhead 時：
+
+    target 8 symmetry：       24,054 entries，約 0.4 MiB
+    target 16 symmetry：   6,551,054 entries，約 100 MiB
+    target 16 exact：     51,918,284 entries，約 792 MiB
+
+這些是 payload 粗估，實際檔案另有少量 header/footer。第一版先不強制壓縮；若未來加入
+壓縮，必須保留 checksum、可安全偵測截斷，並使用新的 format/feature flag。
+
+
+12. 實作順序
+-------------
+
+1. 已完成：shared on-disk constants、128-byte header 與 16-byte record codec。
+2. 已完成：CRC64-ECMA 與 atomic snapshot writer。
+3. 已完成：strict reader、integrity/compatibility validation、載入前暫存 maps。
+4. 已完成：Solver 啟動載入、合併、結束寫回與跨 opening reuse。
+5. 已完成：round-trip、illegal witness、checksum、truncation、wrong target/symmetry 測試。
+6. 後續：standalone Proof Checker 的 TT semantic verification。
+7. 後續：Solver 完成後重新開檔、自動驗證本次 SGF/root proof。
+8. 後續：checkpoint、sorted/mmap、compression 與 multi-process merge。

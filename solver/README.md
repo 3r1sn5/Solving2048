@@ -25,9 +25,10 @@ winning tile  = 8
 node limit    = 0 (unlimited)
 TT            = enabled
 TT symmetry   = enabled
+persistent TT = save result/8/8_ttfile.tt
 network       = 4x6patt
 model         = models/4x6patt.w
-SGF output    = solver/tree.sgf
+SGF output    = result/8/8_ttfile.sgf
 ```
 
 After building, no command-line settings are required:
@@ -54,10 +55,13 @@ node_limit=0
 progress_interval=100000
 use_transposition_table=true
 use_tt_symmetry=true
+load_tt=false
+save_tt=true
+tt_path=result/8/8_ttfile.tt
 opening=2@0,2@1
 network=4x6patt
 model_path=models/4x6patt.w
-sgf_path=solver/tree.sgf
+sgf_path=result/8/8_ttfile.sgf
 ```
 
 CLI resource flags remain optional overrides applied after cfg loading. This is
@@ -70,28 +74,55 @@ extremely large, so use an explicit limit for normal baseline runs.
 Enable the exact transposition table with:
 
 ```bash
-solver/solver2048 --winning-tile 8 --node-limit 0 --tt
+solver/solver2048 --winning-tile 8 --node-limit 0 --tt \
+  --no-load-tt --no-save-tt
 ```
 
 Enable canonical TT keys over all four rotations and four reflected rotations
 with:
 
 ```bash
-solver/solver2048 --winning-tile 8 --node-limit 0 --tt --tt-symmetry
+solver/solver2048 --winning-tile 8 --node-limit 0 --tt --tt-symmetry \
+  --tt-file solver/tt/target8-symmetry.tt
 ```
 
 The TT uses separate Player and Environment maps keyed by the raw 64-bit board.
 It stores only exact `WIN` or `LOSS` results. A node-limit `UNKNOWN` is never
 stored. TT hits are emitted to SGF as exact reference leaves pointing back to
-the first trace node that proved that state. Set `use_transposition_table=false`
-and `use_tt_symmetry=false` in a separate cfg, or use both `--no-tt` and
-`--no-tt-symmetry`, to restore the unchanged path-expanded baseline.
+the first trace node that proved that state, or to a persistent `(phase, key)`
+when loaded from disk. Set `use_transposition_table=false` and
+`use_tt_symmetry=false` in a separate cfg, or use `--no-tt`, to restore the
+path-expanded baseline; `--no-tt` also disables persistent load/save.
 
-The lookup order is winning terminal, TT, node limit, then expansion. Thus an
-already-proven entry remains usable even when the node budget has just been
-exhausted. A TT hit does not consume the expanded-node budget or count as a
-node-limit cutoff. Both tables are cleared at the beginning of every `solve()`;
-they are neither persisted to disk nor shared across solver runs.
+The lookup order is winning terminal, exact TT, node limit, then
+expansion. Thus an already-proven entry remains usable even when the node
+budget has just been exhausted. A TT hit does not consume the expanded-node
+budget or searched-action counters. With `load_tt=true`, an existing snapshot is loaded before
+search; a missing file starts with empty tables. With `save_tt=true`, all loaded
+and newly proven entries are streamed to `<tt_path>.tmp`, checksummed, and
+atomically renamed after search. The file is tied to the winning tile, rules,
+board encoding, and symmetry mode, but not to an opening or N-tuple model, so it
+can be reused and extended by another fixed opening.
+
+The v1 snapshot uses a 128-byte little-endian header, separate Player and
+Environment sections, fixed 16-byte records, and a CRC64-ECMA payload checksum.
+Records contain only canonical/raw board key, exact outcome, existential
+witness, and legal-child count. Run-local trace IDs and action values are not
+persisted. Incompatible or corrupt files are rejected before their entries are
+published to the solver.
+
+Persistent controls can be overridden without editing cfg:
+
+```bash
+solver/solver2048 --tt-file solver/tt/target16.tt --load-tt --save-tt
+solver/solver2048 --no-load-tt --save-tt   # rebuild a snapshot from an empty TT
+solver/solver2048 --load-tt --no-save-tt   # read-only use
+```
+
+Changing `--winning-tile` or TT symmetry while persistent load/save remains
+enabled requires a different compatible `--tt-file`. For a one-off mechanism
+baseline that must not read or overwrite a snapshot, use both `--no-load-tt`
+and `--no-save-tt`.
 
 At each Player node, legal slides are searched in descending action value:
 
@@ -127,7 +158,9 @@ All outcomes use the Player perspective:
 The SGF records every visited DFS child. Actions not called because an AND/OR
 node already had a decisive result are recorded separately as `Skipped`.
 With TT enabled, a repeated state is recorded as a `TRANSPOSITION_TABLE`
-reference leaf rather than duplicating its proven subtree.
+reference leaf rather than duplicating its proven subtree. A trace-local hit
+uses `tt_source_node_id`; a persistent hit uses `tt_source=persistent`,
+`tt_phase`, and `tt_key`, because a previous process's trace ID is not valid.
 
 ## Viewer
 

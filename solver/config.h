@@ -13,6 +13,9 @@ struct SolverConfig {
     std::uint64_t progress_interval = 0;
     bool use_transposition_table = false;
     bool use_tt_symmetry = false;
+    bool load_tt = false;
+    bool save_tt = false;
+    std::filesystem::path tt_path;
     std::array<unsigned, 16> opening{};
     std::string network;
     std::string model_path;
