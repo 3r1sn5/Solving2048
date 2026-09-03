@@ -1,5 +1,7 @@
 #pragma once
 
+#include "rzone.h"
+
 #include <array>
 #include <cstdint>
 #include <filesystem>
@@ -16,6 +18,13 @@ struct SolverConfig {
     bool load_tt = false;
     bool save_tt = false;
     std::filesystem::path tt_path;
+    RZoneMode rzone_mode = RZoneMode::Disabled;
+    RZoneLookupPolicy rzone_lookup_policy = RZoneLookupPolicy::FullScan;
+    unsigned rzone_max_cells = 16;
+    bool rzone_shadow_exact_check = false;
+    bool load_rz = false;
+    bool save_rz = false;
+    std::filesystem::path rz_path;
     std::array<unsigned, 16> opening{};
     std::string network;
     std::string model_path;

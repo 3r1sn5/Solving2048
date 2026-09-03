@@ -53,6 +53,24 @@ std::string nodeComment(const TraceNode& node, const SgfMetadata* metadata)
         }
     }
 
+    if (node.rzone_certificate_id) {
+        comment << "rzone_hit = " << (node.rzone_hit ? "true" : "false") << '\n'
+                << "rzone_certificate_id = " << *node.rzone_certificate_id << '\n';
+        if (node.rzone_kind) {
+            comment << "rzone_kind = " << rzoneStepKindName(*node.rzone_kind) << '\n';
+        }
+        if (node.rzone_mask) {
+            comment << "rzone_mask = 0x" << std::hex << std::setw(4) << std::setfill('0')
+                    << *node.rzone_mask << std::dec << std::setfill(' ') << '\n';
+        }
+        if (node.rzone_masked_board) {
+            comment << "rzone_masked_board = 0x" << std::hex << std::setw(16)
+                    << std::setfill('0') << *node.rzone_masked_board << std::dec
+                    << std::setfill(' ') << '\n';
+        }
+        if (node.rzone_depth) comment << "rzone_depth = " << *node.rzone_depth << '\n';
+    }
+
     if (!node.skipped_actions.empty()) {
         comment << "children_skipped_actions = ";
         for (std::size_t index = 0; index < node.skipped_actions.size(); ++index) {
@@ -81,11 +99,22 @@ std::string nodeComment(const TraceNode& node, const SgfMetadata* metadata)
                 << (metadata->use_transposition_table ? "enabled" : "disabled")
                 << '\n' << "tt_symmetry = "
                 << (metadata->use_tt_symmetry ? "enabled" : "disabled")
+                << '\n' << "rzone_mode = " << rzoneModeName(metadata->rzone_mode)
+                << '\n' << "rzone_lookup_policy = "
+                << rzoneLookupPolicyName(metadata->rzone_lookup_policy)
+                << '\n' << "rzone_max_cells = " << metadata->rzone_max_cells
+                << '\n' << "rzone_shadow_exact_check = "
+                << (metadata->rzone_shadow_exact_check ? "enabled" : "disabled")
                 << '\n' << "persistent_tt_load = "
                 << (metadata->load_tt ? "enabled" : "disabled")
                 << '\n' << "persistent_tt_save = "
                 << (metadata->save_tt ? "enabled" : "disabled")
                 << '\n' << "tt_file = " << metadata->tt_path.string()
+                << '\n' << "persistent_rz_load = "
+                << (metadata->load_rz ? "enabled" : "disabled")
+                << '\n' << "persistent_rz_save = "
+                << (metadata->save_rz ? "enabled" : "disabled")
+                << '\n' << "rz_file = " << metadata->rz_path.string()
                 << '\n' << "config_file = " << metadata->config_path.string()
                 << '\n' << "network = " << metadata->network
                 << '\n' << "model = " << metadata->model_path
@@ -118,7 +147,40 @@ std::string nodeComment(const TraceNode& node, const SgfMetadata* metadata)
                 << metadata->statistics.environment_tt_stores
                 << '\n' << "player_tt_entries = " << metadata->statistics.playerTtEntries()
                 << '\n' << "environment_tt_entries = "
-                << metadata->statistics.environmentTtEntries();
+                << metadata->statistics.environmentTtEntries()
+                << '\n' << "rzone_loaded_certificates = "
+                << metadata->statistics.rzone.loaded_certificates
+                << '\n' << "rzone_patterns_stored = "
+                << metadata->statistics.rzone.patterns_stored
+                << '\n' << "rzone_duplicate_patterns = "
+                << metadata->statistics.rzone.duplicate_patterns
+                << '\n' << "rzone_terminal_certificates = "
+                << metadata->statistics.rzone.terminal_certificates
+                << '\n' << "rzone_slide_lift_attempts = "
+                << metadata->statistics.rzone.slide_lift_attempts
+                << '\n' << "rzone_slide_lift_successes = "
+                << metadata->statistics.rzone.slide_lift_successes
+                << '\n' << "rzone_placement_lift_attempts = "
+                << metadata->statistics.rzone.placement_lift_attempts
+                << '\n' << "rzone_placement_lift_successes = "
+                << metadata->statistics.rzone.placement_lift_successes
+                << '\n' << "rzone_lookups = " << metadata->statistics.rzone.lookups
+                << '\n' << "rzone_masks_indexed = "
+                << metadata->statistics.rzone.masks_indexed
+                << '\n' << "rzone_lookup_masks_tested = "
+                << metadata->statistics.rzone.lookup_masks_tested
+                << '\n' << "rzone_lookup_candidates = "
+                << metadata->statistics.rzone.lookup_candidates
+                << '\n' << "rzone_pattern_matches = "
+                << metadata->statistics.rzone.pattern_matches
+                << '\n' << "rzone_lookup_early_exits = "
+                << metadata->statistics.rzone.lookup_early_exits
+                << '\n' << "rzone_player_hits = " << metadata->statistics.rzone.player_hits
+                << '\n' << "rzone_environment_hits = "
+                << metadata->statistics.rzone.environment_hits
+                << '\n' << "rzone_partial_hits = " << metadata->statistics.rzone.partial_hits
+                << '\n' << "rzone_full_board_hits = "
+                << metadata->statistics.rzone.full_board_hits;
         if (metadata->tt_format_version) {
             comment << '\n' << "tt_format_version = " << *metadata->tt_format_version;
         }
@@ -135,6 +197,21 @@ std::string nodeComment(const TraceNode& node, const SgfMetadata* metadata)
         }
         if (metadata->tt_environment_records) {
             comment << '\n' << "tt_environment_records = " << *metadata->tt_environment_records;
+        }
+        if (metadata->rz_format_version) {
+            comment << '\n' << "rz_format_version = " << *metadata->rz_format_version;
+        }
+        if (metadata->rz_semantics_version) {
+            comment << '\n' << "rz_semantics_version = " << *metadata->rz_semantics_version;
+        }
+        if (metadata->rz_prefix_record_count) {
+            comment << '\n' << "rz_prefix_record_count = "
+                    << *metadata->rz_prefix_record_count;
+        }
+        if (metadata->rz_prefix_checksum) {
+            comment << '\n' << "rz_prefix_checksum = 0x" << std::hex << std::setw(16)
+                    << std::setfill('0') << *metadata->rz_prefix_checksum << std::dec
+                    << std::setfill(' ');
         }
     }
     return comment.str();

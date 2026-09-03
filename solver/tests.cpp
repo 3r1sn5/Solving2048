@@ -1,6 +1,7 @@
 #include "config.h"
 #include "game_api.h"
 #include "proof_checker.h"
+#include "rz_file.h"
 #include "search.h"
 #include "sgf.h"
 #include "tt_file.h"
@@ -35,6 +36,15 @@ using solver2048::PlacementResult;
 using solver2048::ProofManifest;
 using solver2048::ProofTable;
 using solver2048::ProofVerificationResult;
+using solver2048::RZoneCertificate;
+using solver2048::RZoneCertificateId;
+using solver2048::RZoneMode;
+using solver2048::RZoneLookupPolicy;
+using solver2048::RZoneStepKind;
+using solver2048::RZoneTable;
+using solver2048::RzFile;
+using solver2048::RzFileSummary;
+using solver2048::RzProofTable;
 using solver2048::SearchAction;
 using solver2048::SearchResult;
 using solver2048::SolverConfig;
@@ -58,6 +68,8 @@ void check(bool condition, const std::string& message)
 {
     if (!condition) fail(message);
 }
+
+std::string readFile(const std::filesystem::path& path);
 
 void checkNear(double actual, double expected, double tolerance, const std::string& message)
 {
@@ -138,6 +150,239 @@ public:
     mutable std::unordered_map<std::uint64_t, std::size_t> placement_calls;
     mutable std::vector<std::uint64_t> evaluated_afterstates;
 };
+
+class MechanicsGame final : public Game {
+public:
+    Board fixedOpening() const override { return {}; }
+    bool hasWinningTile(Board value, unsigned winning_tile) const override
+    {
+        ++winning_calls;
+        return solver2048::boardHasWinningTile(value, winning_tile);
+    }
+    std::vector<SlideResult> legalSlides(Board value) const override
+    {
+        ++slide_calls;
+        return solver2048::generateLegalSlides(value);
+    }
+    std::vector<PlacementResult> legalPlacements(Board value) const override
+    {
+        ++placement_calls;
+        return solver2048::generateLegalPlacements(value);
+    }
+    double evaluateAfterstate(Board) const override { return 0; }
+    std::array<unsigned, 16> tileValues(Board value) const override
+    {
+        ++tile_value_calls;
+        return solver2048::boardTileValues(value);
+    }
+
+    void resetCalls() const
+    {
+        winning_calls = 0;
+        slide_calls = 0;
+        placement_calls = 0;
+        tile_value_calls = 0;
+    }
+
+    std::uint64_t calls() const
+    {
+        return winning_calls + slide_calls + placement_calls + tile_value_calls;
+    }
+
+    mutable std::uint64_t winning_calls = 0;
+    mutable std::uint64_t slide_calls = 0;
+    mutable std::uint64_t placement_calls = 0;
+    mutable std::uint64_t tile_value_calls = 0;
+};
+
+Board tiles(std::initializer_list<std::pair<int, unsigned>> values)
+{
+    std::array<unsigned, 16> result{};
+    for (const auto& [position, tile] : values) {
+        if (position < 0 || position >= 16) fail("test tile position is out of range");
+        result[static_cast<std::size_t>(position)] = tile;
+    }
+    return solver2048::boardFromTiles(result);
+}
+
+void testRZoneCertificateLiftsAndLookup()
+{
+    MechanicsGame game;
+    RZoneTable table(game, 16, 16);
+
+    const Board terminal = tiles({{0, 16}, {1, 2}});
+    const std::optional<RZoneCertificateId> terminal_id =
+        table.createTerminal(terminal, Phase::Environment);
+    check(terminal_id.has_value(), "winning board must create an RZone terminal certificate");
+    const RZoneCertificate* terminal_certificate = table.find(*terminal_id);
+    check(terminal_certificate && terminal_certificate->kind == RZoneStepKind::Terminal &&
+              terminal_certificate->phase == Phase::Environment &&
+              terminal_certificate->mask == 0x0001 && terminal_certificate->depth == 1,
+          "terminal RZone certificate fields mismatch");
+
+    const Board fixed_slide_parent = tiles({{0, 8}, {2, 8}});
+    const std::optional<RZoneCertificateId> fixed_id =
+        table.liftFixedSlide(fixed_slide_parent, Direction::Left, *terminal_id);
+    check(fixed_id.has_value(), "8,empty,8 must lift a left-slide terminal proof");
+    const RZoneCertificate* fixed = table.find(*fixed_id);
+    check(fixed && fixed->kind == RZoneStepKind::FixedSlide &&
+              fixed->phase == Phase::Player && fixed->slide == Direction::Left &&
+              fixed->mask == 0x0007 && fixed->depth == 2,
+          "fixed-slide RZone preimage must include exactly the consumed input prefix");
+
+    game.resetCalls();
+    const std::optional<RZoneCertificateId> outside_match =
+        table.lookup(tiles({{0, 8}, {2, 8}, {3, 4}}), Phase::Player);
+    check(outside_match == fixed_id,
+          "a change outside the fixed-slide RZone must preserve the proof lookup");
+    check(game.calls() == 0, "RZone lookup must not replay game mechanics");
+    check(!table.lookup(tiles({{0, 8}, {1, 2}, {2, 8}}), Phase::Player),
+          "a change inside the RZone must not match the certificate");
+
+    // Sample arbitrary completions outside the pattern. Every matching board
+    // must keep the fixed action legal and reproduce the child root pattern.
+    std::uint64_t random_state = 0x9e3779b97f4a7c15ull;
+    for (int sample = 0; sample < 256; ++sample) {
+        random_state = random_state * 6364136223846793005ull + 1442695040888963407ull;
+        std::array<unsigned, 16> completion{};
+        for (int position = 0; position < 16; ++position) {
+            const unsigned choice = static_cast<unsigned>((random_state >> (position * 3 % 61)) % 5);
+            completion[static_cast<std::size_t>(position)] = choice == 0 ? 0 : (1u << choice);
+        }
+        completion[0] = 8;
+        completion[1] = 0;
+        completion[2] = 8;
+        const Board candidate = solver2048::boardFromTiles(completion);
+        const std::vector<SlideResult> slides = solver2048::generateLegalSlides(candidate);
+        const auto left = std::find_if(slides.begin(), slides.end(), [](const SlideResult& value) {
+            return value.direction == Direction::Left;
+        });
+        check(left != slides.end(), "every completion of a fixed-slide RZone must keep its action legal");
+        if (RZoneTable::maskedBoard(left->afterstate, terminal_certificate->mask) !=
+            terminal_certificate->masked_board) {
+            std::ostringstream detail;
+            detail << "a fixed-slide RZone completion changed its certified child pattern: board=0x"
+                   << std::hex << candidate.raw << " child=0x" << left->afterstate.raw
+                   << " expected=0x" << terminal_certificate->masked_board;
+            fail(detail.str());
+        }
+    }
+
+    const Board placed_child = tiles({{0, 8}, {1, 8}, {2, 2}});
+    const Board placed_terminal = tiles({{0, 16}, {1, 2}});
+    const std::optional<RZoneCertificateId> placed_terminal_id =
+        table.createTerminal(placed_terminal, Phase::Environment);
+    check(placed_terminal_id.has_value(), "placement fixture terminal certificate missing");
+    const std::optional<RZoneCertificateId> placed_child_id =
+        table.liftFixedSlide(placed_child, Direction::Left, *placed_terminal_id);
+    check(placed_child_id.has_value(), "placement child must lift through its winning slide");
+    const RZoneCertificate* placed_child_certificate = table.find(*placed_child_id);
+    check(placed_child_certificate && placed_child_certificate->mask == 0x0003,
+          "placement-child RZone should exclude the irrelevant spawned tile");
+
+    const Board universal_parent = tiles({{0, 8}, {1, 8}});
+    const std::optional<RZoneCertificateId> universal_id =
+        table.liftUniversalPlacement(universal_parent, *placed_child_id);
+    check(universal_id.has_value(),
+          "Environment proof must lift when every placement is outside the non-empty RZone");
+    const RZoneCertificate* universal = table.find(*universal_id);
+    check(universal && universal->kind == RZoneStepKind::UniversalPlacement &&
+              universal->phase == Phase::Environment && universal->mask == 0x0003 &&
+              universal->depth == 3,
+          "universal-placement RZone certificate fields mismatch");
+
+    const Board blocked_child = tiles({{0, 8}, {2, 8}, {3, 2}});
+    const std::optional<RZoneCertificateId> blocked_child_id =
+        table.liftFixedSlide(blocked_child, Direction::Left, *placed_terminal_id);
+    check(blocked_child_id.has_value(), "blocked universal fixture must have a child proof");
+    const Board blocked_parent = tiles({{0, 8}, {2, 8}});
+    check(!table.liftUniversalPlacement(blocked_parent, *blocked_child_id),
+          "universal lift must fail when Environment may place inside the child RZone");
+
+    const auto& stats = table.statistics();
+    check(stats.slide_lift_successes == 3 && stats.placement_lift_successes == 1 &&
+              stats.placement_lift_blocked == 1 && stats.player_hits == 1,
+          "RZone generation/lookup counters mismatch");
+
+    RZoneTable ordered_table(
+        game, 16, 16, RZoneLookupPolicy::SmallestFirst);
+    const auto large_terminal = ordered_table.createTerminal(
+        tiles({{4, 16}}), Phase::Environment);
+    check(large_terminal.has_value(), "ordered lookup large terminal fixture missing");
+    const auto large_certificate = ordered_table.liftFixedSlide(
+        tiles({{4, 8}, {6, 8}}), Direction::Left, *large_terminal);
+    check(large_certificate.has_value() &&
+              RZoneTable::countCells(ordered_table.find(*large_certificate)->mask) == 3,
+          "ordered lookup large Player certificate fixture mismatch");
+    const auto small_terminal = ordered_table.createTerminal(
+        tiles({{0, 16}}), Phase::Environment);
+    check(small_terminal.has_value(), "ordered lookup small terminal fixture missing");
+    const auto small_certificate = ordered_table.liftFixedSlide(
+        tiles({{0, 8}, {1, 8}}), Direction::Left, *small_terminal);
+    check(small_certificate.has_value() &&
+              RZoneTable::countCells(ordered_table.find(*small_certificate)->mask) == 2,
+          "ordered lookup small Player certificate fixture mismatch");
+    const auto ordered_hit = ordered_table.lookup(
+        tiles({{0, 8}, {1, 8}, {4, 8}, {6, 8}}), Phase::Player);
+    check(ordered_hit == small_certificate,
+          "smallest-first lookup must return a minimum-cell certificate even when stored later");
+    check(ordered_table.statistics().lookup_early_exits == 1 &&
+              ordered_table.statistics().lookup_masks_tested <
+                  ordered_table.statistics().masks_indexed,
+          "smallest-first lookup must stop before testing larger masks after a hit");
+
+    // Broader preimage property test: generate legal slides from varied source
+    // boards, then perturb every cell outside the derived mask. Relevant child
+    // outputs and action legality must remain invariant without lookup replay.
+    random_state = 0xd1b54a32d192ed03ull;
+    for (int source_sample = 0; source_sample < 48; ++source_sample) {
+        std::array<unsigned, 16> source_values{};
+        for (unsigned& tile : source_values) {
+            random_state = random_state * 6364136223846793005ull + 1442695040888963407ull;
+            const unsigned choice = static_cast<unsigned>((random_state >> 32) % 5);
+            tile = choice == 0 ? 0 : (1u << choice);
+        }
+        const Board source = solver2048::boardFromTiles(source_values);
+        for (const SlideResult& source_slide : solver2048::generateLegalSlides(source)) {
+            for (int output_position = 0; output_position < 16; ++output_position) {
+                const std::uint16_t output_mask =
+                    static_cast<std::uint16_t>(std::uint16_t{1} << output_position);
+                const std::uint16_t preimage =
+                    table.deriveSlidePreimageMask(source, source_slide.direction, output_mask);
+                check(preimage != 0, "a legal slide must produce a non-empty RZone preimage");
+                const std::uint64_t expected_output =
+                    RZoneTable::maskedBoard(source_slide.afterstate, output_mask);
+                for (int completion_sample = 0; completion_sample < 8; ++completion_sample) {
+                    std::array<unsigned, 16> completion{};
+                    for (int position = 0; position < 16; ++position) {
+                        random_state = random_state * 6364136223846793005ull +
+                                       1442695040888963407ull;
+                        const unsigned choice = static_cast<unsigned>((random_state >> 32) % 5);
+                        completion[static_cast<std::size_t>(position)] =
+                            choice == 0 ? 0 : (1u << choice);
+                        if ((preimage & (std::uint16_t{1} << position)) != 0) {
+                            completion[static_cast<std::size_t>(position)] =
+                                source_values[static_cast<std::size_t>(position)];
+                        }
+                    }
+                    const Board candidate = solver2048::boardFromTiles(completion);
+                    const std::vector<SlideResult> candidate_slides =
+                        solver2048::generateLegalSlides(candidate);
+                    const auto selected = std::find_if(
+                        candidate_slides.begin(), candidate_slides.end(),
+                        [&](const SlideResult& value) {
+                            return value.direction == source_slide.direction;
+                        });
+                    check(selected != candidate_slides.end(),
+                          "derived RZone preimage did not preserve slide legality");
+                    check(RZoneTable::maskedBoard(selected->afterstate, output_mask) ==
+                              expected_output,
+                          "derived RZone preimage did not preserve a relevant output cell");
+                }
+            }
+        }
+    }
+}
 
 Direction incomingDirection(const TraceNode& node)
 {
@@ -409,6 +654,13 @@ std::string validConfigText()
         "load_tt=true\n"
         "save_tt=false\n"
         "tt_path=solver/tt/test-target16.tt\n"
+        "rzone_mode=lookup\n"
+        "rzone_lookup_policy=smallest_first\n"
+        "rzone_max_cells=12\n"
+        "rzone_shadow_exact_check=false\n"
+        "load_rz=true\n"
+        "save_rz=false\n"
+        "rz_path=solver/rz/test-target16.rz\n"
         "opening=4@5, 2@0 # inline comment\n"
         "network=4x6patt\n"
         "model_path=models/4x6patt.w\n"
@@ -418,17 +670,24 @@ std::string validConfigText()
 void testSolverConfigParsingAndValidation()
 {
     const SolverConfig defaults = solver2048::loadSolverConfig("solver/solver.cfg");
-    check(defaults.winning_tile == 16 && defaults.node_limit == 0 &&
-              defaults.progress_interval == 100000,
+    check(defaults.winning_tile >= 2 &&
+              (defaults.winning_tile & (defaults.winning_tile - 1)) == 0 &&
+              defaults.node_limit == 0 && defaults.progress_interval == 100000,
           "default solver.cfg search settings mismatch");
     check(defaults.use_transposition_table && defaults.use_tt_symmetry,
           "default solver.cfg must enable exact TT and symmetry canonicalization");
     check(!defaults.tt_path.empty(),
           "default solver.cfg must provide a persistent TT path");
+    check(defaults.rzone_mode == solver2048::RZoneMode::Lookup &&
+              defaults.rzone_lookup_policy == RZoneLookupPolicy::SmallestFirst &&
+              defaults.rzone_max_cells == 16 &&
+              !defaults.rzone_shadow_exact_check && !defaults.load_rz &&
+              defaults.save_rz && !defaults.rz_path.empty(),
+          "default solver.cfg RZone settings mismatch");
     check(solver2048::formatOpening(defaults.opening) == "2@0,2@1",
           "default solver.cfg opening mismatch");
     check(defaults.network == "4x6patt" && defaults.model_path == "models/4x6patt.w" &&
-              defaults.sgf_path == "result/16/16_ttfile.sgf",
+              !defaults.sgf_path.empty(),
           "default solver.cfg network/output settings mismatch");
 
     TemporaryConfigFile valid(validConfigText());
@@ -441,6 +700,12 @@ void testSolverConfigParsingAndValidation()
     check(parsed.load_tt && !parsed.save_tt &&
               parsed.tt_path == "solver/tt/test-target16.tt",
           "persistent TT cfg parsing mismatch");
+    check(parsed.rzone_mode == solver2048::RZoneMode::Lookup &&
+              parsed.rzone_lookup_policy == RZoneLookupPolicy::SmallestFirst &&
+              parsed.rzone_max_cells == 12 &&
+              !parsed.rzone_shadow_exact_check && parsed.load_rz &&
+              !parsed.save_rz && parsed.rz_path == "solver/rz/test-target16.rz",
+          "RZone cfg parsing mismatch");
     check(parsed.opening[0] == 2 && parsed.opening[5] == 4 &&
               solver2048::formatOpening(parsed.opening) == "2@0,4@5",
           "cfg opening parsing or deterministic formatting mismatch");
@@ -448,6 +713,15 @@ void testSolverConfigParsingAndValidation()
     TemporaryConfigFile unknown(validConfigText() + "unknown_option=1\n");
     checkThrows([&] { (void)solver2048::loadSolverConfig(unknown.path); },
                 "unknown cfg keys must be rejected");
+
+    std::string invalid_rzone_policy = validConfigText();
+    const std::string valid_policy = "rzone_lookup_policy=smallest_first";
+    invalid_rzone_policy.replace(
+        invalid_rzone_policy.find(valid_policy), valid_policy.size(),
+        "rzone_lookup_policy=all_matches");
+    TemporaryConfigFile invalid_policy(invalid_rzone_policy);
+    checkThrows([&] { (void)solver2048::loadSolverConfig(invalid_policy.path); },
+                "unknown RZone lookup policy must be rejected");
 
     TemporaryConfigFile duplicate(validConfigText() + "winning_tile=8\n");
     checkThrows([&] { (void)solver2048::loadSolverConfig(duplicate.path); },
@@ -471,6 +745,15 @@ void testSolverConfigParsingAndValidation()
     TemporaryConfigFile persistence_dependency(invalid_persistence);
     checkThrows([&] { (void)solver2048::loadSolverConfig(persistence_dependency.path); },
                 "persistent TT load/save without exact TT must be rejected in cfg");
+
+    std::string invalid_rz_persistence = validConfigText();
+    const std::string lookup_mode = "rzone_mode=lookup";
+    invalid_rz_persistence.replace(
+        invalid_rz_persistence.find(lookup_mode), lookup_mode.size(),
+        "rzone_mode=disabled");
+    TemporaryConfigFile rz_persistence_dependency(invalid_rz_persistence);
+    checkThrows([&] { (void)solver2048::loadSolverConfig(rz_persistence_dependency.path); },
+                "persistent RZone load/save while RZone is disabled must be rejected in cfg");
 
     std::string duplicate_opening = validConfigText();
     const std::string opening = "opening=4@5, 2@0 # inline comment";
@@ -886,6 +1169,26 @@ struct TemporaryTtFile {
     std::filesystem::path path;
 };
 
+struct TemporaryRzFile {
+    TemporaryRzFile()
+    {
+        static std::uint64_t sequence = 0;
+        const auto nonce = std::chrono::steady_clock::now().time_since_epoch().count();
+        path = std::filesystem::temp_directory_path() /
+               ("solving2048-rz-test-" + std::to_string(nonce) + "-" +
+                std::to_string(++sequence) + ".rz");
+    }
+
+    ~TemporaryRzFile()
+    {
+        std::error_code ignored;
+        std::filesystem::remove(path, ignored);
+        std::filesystem::remove(path.string() + ".tmp", ignored);
+    }
+
+    std::filesystem::path path;
+};
+
 std::uint8_t readByte(const std::filesystem::path& path, std::uint64_t offset)
 {
     std::ifstream input(path, std::ios::in | std::ios::binary);
@@ -904,6 +1207,179 @@ void writeByte(const std::filesystem::path& path, std::uint64_t offset, std::uin
     output.seekp(static_cast<std::streamoff>(offset));
     output.put(static_cast<char>(value));
     if (!output) fail("cannot mutate byte in temporary TT file");
+}
+
+void refreshRzChecksum(const std::filesystem::path& path)
+{
+    std::ifstream input(path, std::ios::in | std::ios::binary);
+    if (!input) fail("cannot open temporary RZone file for checksum update");
+    input.seekg(static_cast<std::streamoff>(RzFile::kHeaderSize));
+    if (!input) fail("cannot seek to the temporary RZone payload");
+
+    constexpr std::uint64_t polynomial = 0x42f0e1eba9ea3693ull;
+    std::uint64_t checksum = 0;
+    char character = 0;
+    while (input.get(character)) {
+        checksum ^= static_cast<std::uint64_t>(
+                        static_cast<std::uint8_t>(character))
+                    << 56;
+        for (unsigned bit = 0; bit < 8; ++bit) {
+            checksum = (checksum & (std::uint64_t{1} << 63)) != 0
+                ? (checksum << 1) ^ polynomial
+                : checksum << 1;
+        }
+    }
+    if (!input.eof()) fail("cannot read the temporary RZone payload");
+    for (unsigned byte = 0; byte < 8; ++byte) {
+        writeByte(
+            path,
+            64 + byte,
+            static_cast<std::uint8_t>(checksum >> (byte * 8)));
+    }
+}
+
+void testPersistentRzRoundTripAndMaxCellIndexing()
+{
+    MechanicsGame game;
+
+    TemporaryRzFile empty_file;
+    RZoneTable empty_source(game, 16, 16);
+    const RzFileSummary empty_saved = RzFile::save(empty_file.path, empty_source);
+    check(empty_saved.record_count == 0 &&
+              empty_saved.file_size == RzFile::kHeaderSize,
+          "empty RZone snapshot has an invalid summary");
+    RZoneTable empty_loaded(game, 16, 16);
+    const RzFileSummary empty_summary = RzFile::load(empty_file.path, empty_loaded);
+    check(empty_summary.record_count == 0 && empty_loaded.size() == 0,
+          "empty RZone snapshot did not round trip");
+
+    RZoneTable source(game, 16, 16);
+    const auto terminal = source.createTerminal(tiles({{0, 16}}), Phase::Environment);
+    check(terminal.has_value(), "persistent RZone terminal fixture is missing");
+    const auto fixed = source.liftFixedSlide(
+        tiles({{0, 8}, {1, 8}}), Direction::Left, *terminal);
+    check(fixed.has_value(), "persistent RZone FixedSlide fixture is missing");
+    const auto universal = source.liftUniversalPlacement(
+        tiles({{0, 8}, {1, 8}}), *fixed);
+    check(universal.has_value(), "persistent RZone UniversalPlacement fixture is missing");
+    check(source.size() == 3, "persistent RZone fixture must contain a three-record DAG");
+
+    TemporaryRzFile snapshot;
+    const RzFileSummary saved = RzFile::save(snapshot.path, source);
+    check(saved.record_count == 3 &&
+              saved.file_size == RzFile::kHeaderSize + 3 * RzFile::kRecordSize &&
+              std::filesystem::file_size(snapshot.path) == saved.file_size &&
+              !std::filesystem::exists(snapshot.path.string() + ".tmp"),
+          "RZone writer produced an invalid snapshot or left its temporary file");
+    const RzProofTable proof_table = RzProofTable::load(snapshot.path);
+    check(proof_table.summary().record_count == saved.record_count &&
+              proof_table.prefixChecksum(saved.record_count) == saved.payload_checksum &&
+              proof_table.find(*fixed) != nullptr &&
+              RzProofTable::matches(
+                  *proof_table.find(*fixed),
+                  tiles({{0, 8}, {1, 8}, {8, 4}}),
+                  Phase::Player),
+          "independent proof-checker RZone reader rejected or changed a valid snapshot");
+
+    RZoneTable loaded(game, 16, 16);
+    const RzFileSummary loaded_summary = RzFile::load(snapshot.path, loaded);
+    check(loaded_summary.record_count == saved.record_count &&
+              loaded_summary.payload_checksum == saved.payload_checksum &&
+              loaded.size() == source.size() &&
+              loaded.statistics().loaded_certificates == 3,
+          "persistent RZone round trip changed its summary or record count");
+    for (RZoneCertificateId id = 1; id <= source.size(); ++id) {
+        const RZoneCertificate* expected = source.find(id);
+        const RZoneCertificate* actual = loaded.find(id);
+        check(expected && actual && actual->id == expected->id &&
+                  actual->kind == expected->kind && actual->phase == expected->phase &&
+                  actual->winning_tile == expected->winning_tile &&
+                  actual->mask == expected->mask &&
+                  actual->masked_board == expected->masked_board &&
+                  actual->slide == expected->slide &&
+                  actual->terminal_position == expected->terminal_position &&
+                  actual->child == expected->child && actual->depth == expected->depth &&
+                  actual->validated,
+              "persistent RZone round trip changed a certificate");
+    }
+    check(loaded.lookup(tiles({{0, 8}, {1, 8}, {8, 4}}), Phase::Player) == fixed &&
+              loaded.lookup(tiles({{0, 8}, {1, 8}}), Phase::Environment) == universal,
+          "loaded RZone certificates are not available through the rebuilt index");
+
+    TemporaryRzFile rewritten;
+    const RzFileSummary rewritten_summary = RzFile::save(rewritten.path, loaded);
+    check(rewritten_summary.record_count == saved.record_count &&
+              rewritten_summary.payload_checksum == saved.payload_checksum,
+          "rewriting a loaded RZone snapshot changed IDs or payload");
+
+    RZoneTable limited(game, 16, 1);
+    const RzFileSummary limited_summary = RzFile::load(snapshot.path, limited);
+    check(limited_summary.record_count == 3 && limited.size() == 3 &&
+              limited.find(*universal) != nullptr &&
+              limited.statistics().masks_indexed == 1,
+          "max_cells must not discard loaded records or change certificate IDs");
+    check(!limited.lookup(tiles({{0, 8}, {1, 8}}), Phase::Player) &&
+              limited.lookup(tiles({{0, 16}}), Phase::Environment) == terminal,
+          "max_cells must limit only the rebuilt lookup index");
+}
+
+void testPersistentRzRejectsIncompatibleAndCorruptFiles()
+{
+    MechanicsGame game;
+    RZoneTable source(game, 16, 16);
+    const auto terminal = source.createTerminal(tiles({{0, 16}}), Phase::Environment);
+    const auto fixed = source.liftFixedSlide(
+        tiles({{0, 8}, {1, 8}}), Direction::Left, *terminal);
+    const auto universal = source.liftUniversalPlacement(
+        tiles({{0, 8}, {1, 8}}), *fixed);
+    check(terminal && fixed && universal,
+          "corrupt persistent RZone fixture must contain a three-record DAG");
+
+    TemporaryRzFile snapshot;
+    const RzFileSummary saved = RzFile::save(snapshot.path, source);
+
+    RZoneTable wrong_target(game, 32, 16);
+    checkThrows([&] { (void)RzFile::load(snapshot.path, wrong_target); },
+                "RZone snapshot with a different winning tile must be rejected");
+
+    constexpr std::uint64_t fixed_record = RzFile::kHeaderSize + RzFile::kRecordSize;
+    const std::uint8_t original_pattern = readByte(snapshot.path, fixed_record);
+    writeByte(snapshot.path, fixed_record, 0x23);
+    refreshRzChecksum(snapshot.path);
+    RZoneTable invalid_semantics(game, 16, 16);
+    checkThrows([&] { (void)RzFile::load(snapshot.path, invalid_semantics); },
+                "FixedSlide that fails its universal pattern implication must be rejected");
+    checkThrows([&] { (void)RzProofTable::load(snapshot.path); },
+                "proof checker must independently reject invalid FixedSlide semantics");
+    check(invalid_semantics.size() == 0,
+          "failed semantic validation must not partially publish RZone records");
+
+    (void)RzFile::save(snapshot.path, source);
+    writeByte(snapshot.path, fixed_record + 8, 2);
+    refreshRzChecksum(snapshot.path);
+    RZoneTable self_child(game, 16, 16);
+    checkThrows([&] { (void)RzFile::load(snapshot.path, self_child); },
+                "self-referencing RZone child must be rejected");
+    checkThrows([&] { (void)RzProofTable::load(snapshot.path); },
+                "proof checker must independently reject a non-child-first RZone DAG");
+    check(self_child.size() == 0,
+          "failed child-first validation must not partially publish RZone records");
+
+    (void)RzFile::save(snapshot.path, source);
+    writeByte(snapshot.path, fixed_record, original_pattern ^ 0x10u);
+    RZoneTable bad_checksum(game, 16, 16);
+    checkThrows([&] { (void)RzFile::load(snapshot.path, bad_checksum); },
+                "RZone payload checksum corruption must be rejected");
+    checkThrows([&] { (void)RzProofTable::load(snapshot.path); },
+                "proof checker must independently reject RZone checksum corruption");
+
+    (void)RzFile::save(snapshot.path, source);
+    std::filesystem::resize_file(snapshot.path, saved.file_size - 1);
+    RZoneTable truncated(game, 16, 16);
+    checkThrows([&] { (void)RzFile::load(snapshot.path, truncated); },
+                "truncated RZone snapshot must be rejected");
+    checkThrows([&] { (void)RzProofTable::load(snapshot.path); },
+                "proof checker must independently reject a truncated RZone file");
 }
 
 void testPersistentTtRoundTripAndCrossOpeningReuse()
@@ -940,6 +1416,8 @@ void testPersistentTtRoundTripAndCrossOpeningReuse()
     second_game.slides[2] = {slide(Direction::Down, 12)};
     second_game.values[12] = 10.0;
     second_game.placements[12] = {placement(0, 2, 1)};
+    // A persistent Player Win witness is stored in canonical/current orientation.
+    // The hit must regenerate this action value without expanding its old subtree.
     second_game.slides[1] = first_game.slides[1];
     second_game.values[10] = 100.0;
     second_game.values[11] = 50.0;
@@ -1108,8 +1586,6 @@ void checkTiles(const std::array<unsigned, 16>& actual,
     if (actual != expected) fail(message);
 }
 
-std::string readFile(const std::filesystem::path& path);
-
 void testRealGameApiAndThreeNodeSearch()
 {
     const std::filesystem::path model_path = "models/4x6patt.w";
@@ -1243,6 +1719,59 @@ void testRealGameApiAndThreeNodeSearch()
           "unlimited target-8 symmetry TT search must not report a node-limit cutoff");
     checkTraceIdsAreDfsDiscoveryOrder(*symmetry_result.root);
 
+    SolverOptions generation_options{8, 0, 0, true, true};
+    generation_options.rzone_mode = RZoneMode::Generate;
+    SearchResult generation_result = Solver(game, generation_options).solve();
+    check(generation_result.outcome == symmetry_result.outcome &&
+              generation_result.root_action == symmetry_result.root_action &&
+              generation_result.root_action_value == symmetry_result.root_action_value,
+          "RZone generation-only mode must preserve the target-8 root proof");
+    check(generation_result.statistics.player_nodes == symmetry_result.statistics.player_nodes &&
+              generation_result.statistics.environment_nodes ==
+                  symmetry_result.statistics.environment_nodes &&
+              generation_result.statistics.player_actions ==
+                  symmetry_result.statistics.player_actions &&
+              generation_result.statistics.placement_actions ==
+                  symmetry_result.statistics.placement_actions,
+          "RZone generation-only mode must preserve exact-TT expansion/action counts");
+    check(generation_result.statistics.rzone.patterns_stored != 0 &&
+              generation_result.statistics.rzone.lookups == 0 &&
+              generation_result.statistics.rzone.hits() == 0,
+          "RZone generation-only mode must build certificates without pruning");
+
+    SolverOptions rzone_options{8, 0, 0, true, true};
+    rzone_options.rzone_mode = RZoneMode::Lookup;
+    Solver rzone_solver(game, rzone_options);
+    SearchResult rzone_result = rzone_solver.solve();
+    check(rzone_result.outcome == symmetry_result.outcome &&
+              rzone_result.root_action == symmetry_result.root_action &&
+              rzone_result.root_action_value == symmetry_result.root_action_value,
+          "RZone lookup must preserve the target-8 root proof and selected action");
+    check(rzone_result.statistics.rzone.player_hits != 0 &&
+              rzone_result.statistics.rzone.environment_hits != 0 &&
+              rzone_result.statistics.rzone.partial_hits != 0,
+          "target-8 RZone lookup must reuse both Player and Environment partial proofs");
+    check(rzone_result.statistics.combinedNodes() < symmetry_result.statistics.combinedNodes() &&
+              rzone_result.statistics.player_actions < symmetry_result.statistics.player_actions &&
+              rzone_result.statistics.placement_actions <
+                  symmetry_result.statistics.placement_actions,
+          "target-8 RZone lookup must reduce expanded nodes and searched actions");
+    checkTraceIdsAreDfsDiscoveryOrder(*rzone_result.root);
+
+    SolverOptions smallest_first_options = rzone_options;
+    smallest_first_options.rzone_lookup_policy = RZoneLookupPolicy::SmallestFirst;
+    SearchResult smallest_first_result = Solver(game, smallest_first_options).solve();
+    check(smallest_first_result.outcome == symmetry_result.outcome &&
+              smallest_first_result.root_action == symmetry_result.root_action &&
+              smallest_first_result.root_action_value == symmetry_result.root_action_value,
+          "smallest-first RZone lookup must preserve the target-8 root proof");
+    check(smallest_first_result.statistics.rzone.lookup_early_exits ==
+              smallest_first_result.statistics.rzone.hits() &&
+              smallest_first_result.statistics.rzone.lookup_masks_tested <
+                  rzone_result.statistics.rzone.lookup_masks_tested,
+          "smallest-first target-8 lookup must early-return and test fewer masks");
+    checkTraceIdsAreDfsDiscoveryOrder(*smallest_first_result.root);
+
     TemporaryTtFile proof_tt;
     const TtFileSummary proof_summary = TtFile::save(proof_tt.path, symmetry_solver);
     TemporaryTtFile proof_sgf;
@@ -1290,16 +1819,12 @@ void testRealGameApiAndThreeNodeSearch()
           "target-8 proof SGF lacks the expected second DFS visit");
     corrupt_sgf.replace(order_position, valid_order.size(), "dfs_visit_order = 9");
     {
-        std::ofstream output(
-            corrupt_trace.path, std::ios::out | std::ios::binary | std::ios::trunc);
+        std::ofstream output(corrupt_trace.path, std::ios::out | std::ios::binary | std::ios::trunc);
         output << corrupt_sgf;
         check(static_cast<bool>(output), "cannot write corrupt trace fixture");
     }
     checkThrows(
-        [&] {
-            (void)solver2048::verifySgfTrace(
-                corrupt_trace.path, proof_manifest, proof_table);
-        },
+        [&] { (void)solver2048::verifySgfTrace(corrupt_trace.path, proof_manifest, proof_table); },
         "complete SGF trace audit must reject a corrupt DFS visit order");
 
     ProofManifest wrong_claim = proof_manifest;
@@ -1310,6 +1835,106 @@ void testRealGameApiAndThreeNodeSearch()
     ++*wrong_binding.tt_payload_checksum;
     checkThrows([&] { (void)solver2048::verifyRootProof(wrong_binding, proof_table); },
                 "proof checker must reject an SGF/TT checksum binding mismatch");
+
+    TemporaryTtFile rzone_proof_tt;
+    const TtFileSummary rzone_tt_summary = TtFile::save(rzone_proof_tt.path, rzone_solver);
+    TemporaryRzFile rzone_proof_rz;
+    const RzFileSummary rzone_rz_summary = RzFile::save(rzone_proof_rz.path, rzone_solver);
+    TemporaryTtFile rzone_proof_sgf;
+    SgfMetadata rzone_metadata;
+    rzone_metadata.winning_tile = 8;
+    rzone_metadata.use_transposition_table = true;
+    rzone_metadata.use_tt_symmetry = true;
+    rzone_metadata.rzone_mode = RZoneMode::Lookup;
+    rzone_metadata.save_tt = true;
+    rzone_metadata.tt_path = rzone_proof_tt.path;
+    rzone_metadata.tt_format_version = TtFile::kFormatVersion;
+    rzone_metadata.tt_payload_checksum = rzone_tt_summary.payload_checksum;
+    rzone_metadata.tt_file_size = rzone_tt_summary.file_size;
+    rzone_metadata.tt_player_records = rzone_tt_summary.player_entries;
+    rzone_metadata.tt_environment_records = rzone_tt_summary.environment_entries;
+    rzone_metadata.save_rz = true;
+    rzone_metadata.rz_path = rzone_proof_rz.path;
+    rzone_metadata.rz_format_version = RzFile::kFormatVersion;
+    rzone_metadata.rz_semantics_version = RzFile::kSemanticsVersion;
+    rzone_metadata.rz_prefix_record_count = rzone_rz_summary.record_count;
+    rzone_metadata.rz_prefix_checksum = rzone_rz_summary.payload_checksum;
+    rzone_metadata.opening = expected_opening;
+    rzone_metadata.statistics = rzone_result.statistics;
+    SgfWriter::write(rzone_proof_sgf.path, *rzone_result.root, rzone_metadata);
+
+    const ProofTable mixed_tt = ProofTable::load(rzone_proof_tt.path);
+    const RzProofTable original_rz = RzProofTable::load(rzone_proof_rz.path);
+    const ProofManifest mixed_manifest =
+        solver2048::readProofManifest(rzone_proof_sgf.path);
+    const ProofVerificationResult mixed_verified =
+        solver2048::verifyRootProof(mixed_manifest, mixed_tt, &original_rz);
+    check(mixed_verified.root_outcome == Outcome::Win &&
+              mixed_verified.artifact_binding_verified &&
+              mixed_verified.rzone_artifact_binding_verified &&
+              mixed_verified.statistics.rzone_certificates_used != 0,
+          "mixed TT/RZone root proof must verify using the SGF-bound RZone prefix");
+    const solver2048::TraceVerificationStatistics mixed_trace =
+        solver2048::verifySgfTrace(
+            rzone_proof_sgf.path, mixed_manifest, mixed_tt, &original_rz);
+    check(mixed_trace.rzone_leaves_checked != 0 &&
+              mixed_trace.rzone_annotations_checked >= mixed_trace.rzone_leaves_checked,
+          "RZone SGF trace audit must verify certificate leaves and annotations");
+
+    RZoneTable extended_rz(game, 8, 16);
+    (void)RzFile::load(rzone_proof_rz.path, extended_rz);
+    const auto appended = extended_rz.createTerminal(tiles({{15, 16}}), Phase::Player);
+    check(appended && *appended > rzone_rz_summary.record_count,
+          "cross-opening RZone fixture must append a new certificate ID");
+    const RzFileSummary extended_summary = RzFile::save(rzone_proof_rz.path, extended_rz);
+    const RzProofTable newer_rz = RzProofTable::load(rzone_proof_rz.path);
+    check(extended_summary.record_count > rzone_rz_summary.record_count &&
+              newer_rz.prefixChecksum(rzone_rz_summary.record_count) ==
+                  rzone_rz_summary.payload_checksum,
+          "appending cross-opening certificates must preserve the old bound prefix");
+    const ProofVerificationResult newer_verified =
+        solver2048::verifyRootProof(mixed_manifest, mixed_tt, &newer_rz);
+    const solver2048::TraceVerificationStatistics newer_trace =
+        solver2048::verifySgfTrace(
+            rzone_proof_sgf.path, mixed_manifest, mixed_tt, &newer_rz);
+    check(newer_verified.rzone_artifact_binding_verified &&
+              newer_verified.statistics.rzone_certificates_used != 0 &&
+              newer_trace.rzone_leaves_checked != 0,
+          "an SGF must remain verifiable after another opening appends to its .rz file");
+
+    ProofManifest wrong_rz_binding = mixed_manifest;
+    ++*wrong_rz_binding.rz_prefix_checksum;
+    checkThrows(
+        [&] { (void)solver2048::verifyRootProof(wrong_rz_binding, mixed_tt, &newer_rz); },
+        "proof checker must reject an SGF/RZone prefix checksum mismatch");
+
+    TemporaryTtFile out_of_prefix_trace;
+    std::string bad_rzone_sgf = readFile(rzone_proof_sgf.path);
+    const std::size_t rzone_leaf = bad_rzone_sgf.find("solved_by = RZONE_TT");
+    const std::size_t certificate_field = bad_rzone_sgf.find(
+        "rzone_certificate_id = ", rzone_leaf);
+    check(rzone_leaf != std::string::npos && certificate_field != std::string::npos,
+          "RZone proof SGF lacks a certificate lookup leaf");
+    const std::size_t certificate_value = certificate_field +
+        std::string("rzone_certificate_id = ").size();
+    const std::size_t certificate_end = bad_rzone_sgf.find('\n', certificate_value);
+    bad_rzone_sgf.replace(
+        certificate_value,
+        certificate_end - certificate_value,
+        std::to_string(*appended));
+    {
+        std::ofstream output(
+            out_of_prefix_trace.path,
+            std::ios::out | std::ios::binary | std::ios::trunc);
+        output << bad_rzone_sgf;
+        check(static_cast<bool>(output), "cannot write out-of-prefix RZone trace fixture");
+    }
+    checkThrows(
+        [&] {
+            (void)solver2048::verifySgfTrace(
+                out_of_prefix_trace.path, mixed_manifest, mixed_tt, &newer_rz);
+        },
+        "SGF trace must not reference a certificate appended after its bound prefix");
 }
 
 std::string readFile(const std::filesystem::path& path)
@@ -1416,6 +2041,11 @@ void testSgfActionEncodingEscapingAndOrder()
     root.solved_by = SolvedBy::Backpropagation;
     root.expanded = true;
     root.children_total = 3;
+    root.rzone_certificate_id = 7;
+    root.rzone_kind = RZoneStepKind::FixedSlide;
+    root.rzone_mask = 0x0007;
+    root.rzone_masked_board = 0x0000000000000303ull;
+    root.rzone_depth = 2;
     root.skipped_actions = {
         SearchAction::slide(Direction::Left),
         SearchAction::slide(Direction::Up),
@@ -1455,6 +2085,7 @@ void testSgfActionEncodingEscapingAndOrder()
     right->tt_symmetry_hit = true;
     right->tt_transform = 3;
     right->tt_source_trace_id = 2;
+    right->tt_key = 0x1234;
     right->dfs_order = 1;
     right->incoming_action = SearchAction::slide(Direction::Right);
     right->reward = 0;
@@ -1469,6 +2100,19 @@ void testSgfActionEncodingEscapingAndOrder()
     metadata.node_limit = 3;
     metadata.use_transposition_table = true;
     metadata.use_tt_symmetry = true;
+    metadata.rzone_mode = RZoneMode::Lookup;
+    metadata.rzone_lookup_policy = RZoneLookupPolicy::SmallestFirst;
+    metadata.rzone_max_cells = 12;
+    metadata.load_tt = true;
+    metadata.save_tt = true;
+    metadata.tt_path = "solver/tt/test.tt";
+    metadata.load_rz = true;
+    metadata.save_rz = true;
+    metadata.rz_path = "solver/rz/test.rz";
+    metadata.rz_format_version = RzFile::kFormatVersion;
+    metadata.rz_semantics_version = RzFile::kSemanticsVersion;
+    metadata.rz_prefix_record_count = 7;
+    metadata.rz_prefix_checksum = 0x123456789abcdef0ull;
     metadata.config_path = "solver/test.cfg";
     metadata.opening[2] = 4;
     metadata.opening[15] = 2;
@@ -1477,6 +2121,8 @@ void testSgfActionEncodingEscapingAndOrder()
     metadata.elapsed_seconds = 1.25;
     metadata.statistics.player_nodes = 2;
     metadata.statistics.environment_nodes = 1;
+    metadata.statistics.rzone.loaded_certificates = 5;
+    metadata.statistics.rzone.patterns_stored = 9;
 
     TemporarySgf temporary;
     SgfWriter::write(temporary.path, root, metadata);
@@ -1519,6 +2165,29 @@ void testSgfActionEncodingEscapingAndOrder()
               sgf.find("tt_transform = 3:rotate270") != std::string::npos &&
               sgf.find("tt_symmetry = enabled") != std::string::npos,
           "SGF must expose symmetry TT mode, hit classification, and transform");
+    check(sgf.find("tt_source = trace") != std::string::npos &&
+              sgf.find("tt_phase = ENVIRONMENT") != std::string::npos &&
+              sgf.find("tt_key = 0x0000000000001234") != std::string::npos &&
+              sgf.find("persistent_tt_load = enabled") != std::string::npos &&
+              sgf.find("persistent_tt_save = enabled") != std::string::npos &&
+              sgf.find("tt_file = solver/tt/test.tt") != std::string::npos,
+          "SGF must expose TT phase/key/source and persistent snapshot settings");
+    check(sgf.find("rzone_mode = lookup") != std::string::npos &&
+              sgf.find("rzone_lookup_policy = smallest_first") != std::string::npos &&
+              sgf.find("rzone_max_cells = 12") != std::string::npos &&
+              sgf.find("rzone_loaded_certificates = 5") != std::string::npos &&
+              sgf.find("rzone_patterns_stored = 9") != std::string::npos &&
+              sgf.find("persistent_rz_load = enabled") != std::string::npos &&
+              sgf.find("persistent_rz_save = enabled") != std::string::npos &&
+              sgf.find("rz_file = solver/rz/test.rz") != std::string::npos &&
+              sgf.find("rz_format_version = 1") != std::string::npos &&
+              sgf.find("rz_semantics_version = 1") != std::string::npos &&
+              sgf.find("rz_prefix_record_count = 7") != std::string::npos &&
+              sgf.find("rz_prefix_checksum = 0x123456789abcdef0") != std::string::npos &&
+              sgf.find("rzone_certificate_id = 7") != std::string::npos &&
+              sgf.find("rzone_kind = FIXED_SLIDE") != std::string::npos &&
+              sgf.find("rzone_mask = 0x0007") != std::string::npos,
+          "SGF must expose RZone configuration, counters, and node certificate metadata");
 
     const std::size_t source_visit_position = sgf.find("dfs_visit_order = 2");
     const std::size_t hit_visit_position = sgf.find("dfs_visit_order = 4");
@@ -1554,6 +2223,7 @@ int main()
         {"reward + value ordering and direction tie-break",
          testActionValueOrderingAndDirectionTieBreak},
         {"solver.cfg parsing and validation", testSolverConfigParsingAndValidation},
+        {"RZone certificate lifts and replay-free lookup", testRZoneCertificateLiftsAndLookup},
         {"D4 canonicalization and action transforms", testD4CanonicalizationAndActionTransforms},
         {"Player symmetry TT hit and witness mapping",
          testPlayerSymmetryTranspositionHitAndWitnessMapping},
@@ -1565,6 +2235,10 @@ int main()
          testEnvironmentTranspositionHitAndOutcomeConsistency},
         {"Unknown outcomes are not cached", testUnknownOutcomesAreNotCached},
         {"combined node-limit Unknown semantics", testNodeLimitReturnsUnknownForEveryAttemptedChild},
+        {"persistent RZone round trip and max-cell indexing",
+         testPersistentRzRoundTripAndMaxCellIndexing},
+        {"persistent RZone compatibility and corruption rejection",
+         testPersistentRzRejectsIncompatibleAndCorruptFiles},
         {"persistent TT round trip and cross-opening reuse",
          testPersistentTtRoundTripAndCrossOpeningReuse},
         {"persistent TT compatibility and corruption rejection",

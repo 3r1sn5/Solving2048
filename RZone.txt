@@ -1,0 +1,513 @@
+2048 Solver RZone 實作與語意
+===========================
+
+文件狀態
+--------
+
+本文件整理目前已討論並確定的 in-memory RZone 設計、推導與 Solver 整合方向。
+Persistent `.rz` 的檔案格式、SGF binding 與 Proof Checker 驗證規格另見 `RZ_file.txt`。
+
+核心決策如下：
+
+1. RZone 保存的是可組合、不可變、已驗證的局部 Win certificate，不只是 mask。
+2. Certificate 從 terminal 往 parent 反向推導，每次只驗證 parent 到已驗證 child
+   的 one-step proof obligation。
+3. 不需要在每次推導後從 parent 完整 replay 到 terminal。
+4. RZone lookup 也不 replay；只要 Candidate 符合一份已驗證 certificate 的 root
+   pattern，即可重用 Player-view Win。
+5. Lookup 順序採 Terminal -> RZone -> Exact TT -> node limit -> DFS。
+6. 第一版 RZone 只證明 Win，不保存 Loss 或 Unknown certificate。
+7. Exact TT 暫時保留作為 RZone miss 的完整 fallback；長期可把 Exact TT 視為
+   `mask=0xffff` 的 RZone 特例，再評估是否整合或移除獨立 Exact TT。
+
+
+1. RZone 的目的
+--------------
+
+Exact TT 只有在完整 16 格盤面與 phase 相同時才能重用結果。RZone 則描述一份
+Win proof 真正依賴的格子，允許 RZone 外的盤面不同。
+
+例如 winning tile 為 16：
+
+    Source:       8 8 0 0 --Left--> 16 0 0 0
+    Candidate:    8 8 2 4 --Left--> 16 2 4 0
+    RZone mask:   1 1 0 0
+
+兩個盤面的後兩格不同，Exact TT 不會命中；但只要前兩格都是 8，同一份局部
+Left proof 仍可能成立。
+
+RZone mask 內必須比較完整 tile value，包含 0。0 代表「這一格必須為空」，不是
+don't-care。Mask 外才是不影響這份 certificate 的區域。
+
+
+2. Outcome 與 AND/OR 語意
+-------------------------
+
+所有結果仍固定採 Player 視角：
+
+    Player Win       至少有一個 slide child 是 Win。
+    Player Loss      所有 slide children 都是 Loss。
+    Environment Win  所有 placement children 都是 Win。
+    Environment Loss 至少有一個 placement child 是 Loss。
+
+第一版 linear RZone 只表示 Player-view Win：
+
+    Player Win       以一個 FixedSlide certificate 表示。
+    Environment Win  以一個 UniversalPlacement certificate 表示。
+
+第一版不建立以下 certificate：
+
+    Player Loss
+    Environment Loss
+    Unknown / node-limit cutoff
+    不同 placements 使用不同 child certificates 的多分支 universal proof
+
+因此第一版 RZone miss 只表示「沒有適用的局部 Win certificate」，不能解讀成 Loss。
+
+
+3. Certificate 資料模型
+----------------------
+
+建議使用 immutable certificate DAG。第一版雖然邏輯上是一條 linear chain，但每個
+parent 只引用已存在的 child certificate，避免重複複製整條 suffix。
+
+    enum class RZoneStepKind {
+        Terminal,
+        FixedSlide,
+        UniversalPlacement,
+    };
+
+    struct RZoneCertificate {
+        CertificateId id;
+        RZoneStepKind kind;
+        Phase phase;
+        unsigned winning_tile;
+        uint16_t mask;
+        uint64_t masked_board;
+
+        optional<Direction> slide;
+        optional<int> terminal_position;
+        optional<CertificateId> child;
+
+        unsigned depth;
+        bool validated;
+    };
+
+其中：
+
+- `mask`：16-bit，每個 bit 對應一個 board cell。
+- `masked_board`：只保留 mask 內的 4-bit tile ranks/values，其餘 bits 為 0。
+- `phase`：certificate 適用於 Player 或 Environment node。
+- `slide`：只用於 FixedSlide。
+- `terminal_position`：只用於 Terminal。
+- `child`：FixedSlide 或 UniversalPlacement 引用的已驗證 child certificate。
+- `validated`：只有所有 construction invariants 通過後才可設為 true 並發布。
+
+Certificate 發布後不可修改。Parent 只能引用 `validated=true`、winning tile 相同且
+phase 相容的 child，並禁止 dependency cycle。
+
+
+4. Certificate 的歸納證明
+------------------------
+
+假設 proof chain 為：
+
+    C -> B -> A -> Terminal
+
+推導順序為：
+
+1. Terminal pattern 本身保證 winning tile，Terminal certificate 成立。
+2. 驗證 A one-step 後一定進入 Terminal pattern，因此 A 成立。
+3. 驗證 B one-step 後一定進入 A pattern；A 已成立，因此 B 成立。
+4. 驗證 C one-step 後一定進入 B pattern；B 已成立，因此 C 成立。
+
+所以不需要在建立 C 時重新執行：
+
+    C -> B -> A -> Terminal
+
+每一層只需完成新的 local proof obligation。這是 certificate 可以組合並且 lookup
+不必 replay 的基礎。
+
+要特別注意：one-step 對 Source 盤面的成功只是 sanity check。真正允許 RZone 泛化到
+其他 Candidate 的條件，是 parent pattern 必須是對所有 mask 外填法都成立的充分條件。
+
+
+5. Terminal certificate
+-----------------------
+
+若盤面已含 winning tile，選擇一個達標位置作為 seed：
+
+    board: 16 0 0 0
+    mask:   1 0 0 0
+
+Terminal invariant：
+
+    Candidate 符合 mask/masked_board
+    => terminal_position 的 tile >= winning_tile
+    => Candidate 是 Win
+
+建立時必須檢查：
+
+- terminal position 合法。
+- 該格確實達到 winning tile。
+- mask 包含 terminal position。
+- phase 與目前 node 相同。
+- mask 非空。
+
+
+6. FixedSlide certificate 與 slide preimage
+-------------------------------------------
+
+Player Win node 使用 selected winning slide 與 child certificate 向上推導。
+
+例如：
+
+    Parent: 8 0 8 0 --Left--> Child: 16 0 0 0
+    Child mask:  1 0 0 0
+    Parent mask: 1 1 1 0
+
+Parent mask 必須包含兩個 8 與中間的空格，才能保證第一個輸出一定是 16。
+
+FixedSlide invariant：對所有符合 parent pattern 的完整盤面 S：
+
+1. 指定 slide 在 S 上一定合法。
+2. `apply(S, slide)` 在 child mask 內一定等於 child masked board。
+3. Child certificate 已驗證。
+
+`deriveSlidePreimage(parent, slide, child_mask)` 必須：
+
+- 依滑動方向逐 row/column 追蹤真正決定 relevant outputs 的來源 prefix。
+- 保留會影響壓縮、合併順序的非零 tiles 與必要空格。
+- 若 child mask 要求 empty output，保守地納入足以決定該 empty 的完整 line。
+- 額外保留至少一條確實改變的完整 line，作為 slide 一定合法的 witness；不能讓
+  mask 外的內容決定 action 是否合法。
+- 無法產生 sound preimage 時停止 RZone propagation，不以猜測 mask 繼續。
+
+建立 parent certificate 時，可以在 Source parent 上實際執行一次 slide，確認 child
+board 符合 child root pattern；但不再 replay child suffix。
+
+
+7. UniversalPlacement certificate
+---------------------------------
+
+Environment Win 必須保證所有合法 placements 都進入同一份已驗證 child certificate。
+第一版只支援 shared linear suffix：
+
+    Environment Parent
+        --任意合法 placement-->
+    同一個 Child pattern
+        -> child certificate
+
+安全條件：
+
+1. Parent phase 是 Environment，child phase 是 Player。
+2. Child certificate 已驗證且是 Win certificate。
+3. Parent mask/masked board 與 child root pattern 相同。
+4. Child RZone 內不能含必須為空的格子。只要 RZone 內每格都是 non-empty，
+   Environment placement 就只能發生在 RZone 外，不會改變 child pattern。
+5. 在 Source parent 上列舉所有合法 placement actions，包含每個空格的 2 與 4，
+   做 one-step sanity check；每個 child 都必須符合同一 child root pattern。
+
+任一 placement 會修改 RZone 或不符合 child pattern時，UniversalPlacement lift 失敗，
+certificate 停在 child，不向 Environment parent 或更上層傳播。
+
+第一版不把不同 child masks 聯集後直接當成 universal proof，也不為不同 placements
+保存不同 suffix。這些屬於後續的 proof DAG 擴充。
+
+
+8. Lookup 不 replay
+------------------
+
+RZone lookup 把 certificate 視為已證明的充分條件。正常 lookup 只檢查：
+
+1. Certificate 已 validated 且仍存在。
+2. Phase 相同。
+3. Winning tile 相同。
+4. Mask 非空。
+5. Candidate 在 mask 內的完整 tile values 等於 `masked_board`。
+6. Step metadata 合法；Player root 必須能提供 FixedSlide witness，Environment root
+   必須是 UniversalPlacement，terminal 則依 terminal 規則處理。
+
+符合後直接回傳 Player-view Win，不執行 slide、不列舉 Candidate placements，也不走訪
+certificate suffix。
+
+Hash/index 只負責找候選 pattern；最後必須做 exact masked comparison。Hash collision
+只能增加比較次數，不能直接構成 RZone hit。
+
+因為 lookup 不再提供第二層防護，slide preimage、universal placement invariant、phase、
+symmetry transform 與 certificate immutability 都屬於 correctness-critical code。
+
+
+9. 與 Exact TT 的 lookup 順序
+----------------------------
+
+已決定採 RZone-first：
+
+    solve(state, phase):
+        if winning terminal:
+            return Win + Terminal certificate
+
+        if RZone lookup hit:
+            return Win + matched certificate
+
+        if Exact TT lookup hit:
+            return exact Win/Loss
+
+        if node limit reached:
+            return Unknown
+
+        expand with normal DFS
+
+原因：
+
+- RZone hit 同時提供 outcome 與較局部的 certificate，可繼續向 parent 推導。
+- Exact TT 若先返回但沒有 certificate，會中斷 RZone propagation。
+- 本專案希望把 RZone 作為主要 proof reuse 機制，Exact TT 作過渡期 fallback。
+- 長期希望評估 RZone 是否能涵蓋並整合 Exact TT。
+
+過渡期可以提供 debug-only shadow Exact lookup：RZone 宣稱 Win 時，如果同一完整盤面
+已有 Exact Loss，立即報錯。正常效能實驗可關閉 shadow lookup。
+
+
+10. 自然 DFS backpropagation 後的 RZone 更新
+--------------------------------------------
+
+Player node：
+
+- Outcome 是 Win 且有 selected winning slide 時，從該 child 的 certificate 建立
+  FixedSlide parent certificate。
+- Child 沒有 certificate、preimage 失敗或 local obligation 失敗時，不建立 parent
+  certificate；原本 Win outcome 不受影響。
+- Player Loss/Unknown 不建立第一版 RZone certificate。
+
+Environment node：
+
+- Outcome 是 Win 時，嘗試從已驗證 child certificates 中找到一份所有 placements
+  可共用的 suffix，建立 UniversalPlacement parent certificate。
+- 可依序嘗試不同 child certificate，選擇 root mask 較小者；相同時選 depth 較短者。
+- 找不到 shared certificate 時停止 propagation；Environment Win outcome 不受影響。
+- Environment Loss/Unknown 不建立第一版 RZone certificate。
+
+自然解出或 RZone 命中的 exact outcome 仍可照現有規則存入 in-memory Exact TT；但本階段
+不修改 TT file 格式。
+
+
+11. RZone pattern table
+----------------------
+
+第一版 table 只存在 Solver process memory，生命週期與一次 solve 相同。Pattern 至少包含：
+
+    phase
+    winning_tile
+    root mask
+    root masked_board
+    certificate ID
+
+同一 pattern 可對應多份 certificates。若同一 Candidate 命中多份 proof，優先選擇：
+
+1. Root RZone cells 較少。
+2. Cells 相同時 certificate depth 較短。
+3. 再相同時使用較早建立的 immutable certificate，確保 deterministic。
+
+Correctness prototype 可先按 mask 分組：
+
+    mask -> masked_board -> certificate IDs
+
+Lookup policy 可切換：
+
+    rzone_lookup_policy = full_scan | smallest_first
+
+- `full_scan`：依 cell count 走訪全部 distinct masks，再以 cells、depth、ID 選全域最佳，
+  作為原始行為 baseline。
+- `smallest_first`：依 cell count 由小到大走訪；第一個有效 match 立即返回。因為更小的
+  cell-count groups 已全部 miss，仍保證回傳 minimum-cell certificate，但不再為同尺寸
+  certificate 的 depth/ID tie-break 掃描剩餘 masks。
+- 兩種 policy 共用預先展開的 64-bit nibble mask，最後仍做 exact masked comparison。
+
+若 miss cost 或 pattern/mask 數量仍使 lookup 成為瓶頸，再參考 `../game-solver` 改為
+subset hash 或 inverted fact index。索引最佳化不可改變最後的 exact masked comparison。
+
+
+12. Config
+----------
+
+建議以單一 mode 避免互相矛盾的 boolean 組合：
+
+    rzone_mode = disabled | generate | lookup
+    rzone_lookup_policy = full_scan | smallest_first
+
+語意：
+
+- `disabled`：完全不生成或查詢 RZone，作為 Exact TT baseline。
+- `generate`：生成、one-step 驗證並統計 certificates，但不能用 RZone 改變 DFS。
+- `lookup`：RZone-first lookup，miss 後才查 Exact TT。
+
+其他初期 config：
+
+    rzone_max_cells = 16
+    rzone_shadow_exact_check = false
+
+RZone 只以 cell 數限制向上 propagation；certificate depth 保留作統計與同 cell 數時的
+選擇資訊，不作為推導上限。限制命中時只視為 RZone miss 或停止向上 propagation，不能
+改成 Loss/Unknown，也不能影響原本 AND/OR 結果。
+
+
+13. 必要統計
+------------
+
+Generation：
+
+    rzone_terminal_certificates
+    rzone_slide_lift_attempts
+    rzone_slide_lift_successes
+    rzone_slide_lift_failures
+    rzone_placement_lift_attempts
+    rzone_placement_lift_successes
+    rzone_placement_lift_blocked
+    rzone_patterns_stored
+    rzone_duplicate_patterns
+
+Lookup：
+
+    rzone_lookups
+    rzone_masks_indexed
+    rzone_lookup_masks_tested
+    rzone_lookup_candidates
+    rzone_pattern_matches
+    rzone_lookup_early_exits
+    rzone_pattern_matches
+    rzone_hits
+    rzone_partial_hits
+    rzone_full_board_hits
+    rzone_shadow_exact_hits
+    rzone_shadow_exact_conflicts
+    exact_tt_lookups_after_rzone_miss
+    exact_tt_hits_after_rzone_miss
+
+Distribution：
+
+    certificate depth histogram
+    root RZone cell-count histogram
+    slide lift failure reasons
+    placement barrier position/tile diagnostics
+
+RZone-first 後的 `exact_tt_hits` 只代表 RZone miss 後仍由 Exact TT 解決的 states；不能與
+舊版 Exact-first 數字直接解讀成相同指標。
+
+
+14. Trace 與 solved_by
+----------------------
+
+第一版仍在 solver trace 中區分結果來源，建議新增：
+
+    solved_by = RZONE_TT
+    rzone_certificate_id
+    rzone_mask
+    rzone_masked_board
+    rzone_cells
+    rzone_depth
+
+Player RZone hit 可將 certificate root 的 FixedSlide 設為 selected action；Environment
+RZone Win 是 universal proof，不應設定單一 selected placement。
+
+這些欄位供 solver debug、SGF/viewer 觀察與效能分析。它們與 persistent `.rz` snapshot
+及 Proof Checker 的綁定規格另見 `RZ_file.txt`。
+
+
+15. 第一階段實作步驟
+--------------------
+
+Step 1：核心資料與純函式
+
+- 建立 `solver/rzone.h`、`solver/rzone.cpp`。
+- 實作 mask、masked board、cell count。
+- 實作 immutable certificate arena/table。
+- 實作 Terminal certificate。
+- 實作 slide preimage 與 FixedSlide lift。
+- 實作 UniversalPlacement shared-child lift。
+
+Step 2：Generation-only
+
+- 在自然 terminal、Player Win、Environment Win backpropagation 後嘗試建立 certificate。
+- 寫入統計與 trace annotation。
+- 不查 RZone、不改變 Outcome、不改變 DFS traversal。
+
+Step 3：RZone-first verified-certificate lookup
+
+- 建立 in-memory pattern index。
+- 在 Exact TT 前查詢 validated certificates。
+- Pattern match 後不 replay，直接回傳 Win。
+- RZone miss 才執行原本 Exact TT lookup。
+- 加入 optional shadow Exact consistency check。
+
+Step 4：效能與索引
+
+- 比較 mask-group scan 與 subset/inverted index。
+- 加入 certificate interning、duplicate elimination。
+- 初期不加入 RZone symmetry；等 identity 版本穩定後，再同步 transform mask、masked
+  board、slide direction、terminal position 與整條 certificate DAG。
+
+
+16. 測試與驗收
+--------------
+
+Pure mechanics：
+
+1. Masked board 必須保留 mask 內的零值條件。
+2. Terminal certificate 只接受真正達標位置。
+3. `8 0 8 0 --Left--> 16` 的 preimage 必須包含兩個 8 與中間空格。
+4. Relevant output 不足以保證 slide 合法時，必須加入 changed-line witness。
+5. 對 row/column 做 exhaustive 或 property-based 測試：任意 Candidate 只要符合
+   derived parent pattern，slide 必須合法且 child relevant outputs 必須相同。
+
+Universal placement：
+
+6. `8 8 0 0` 的 `mask=1100` 可以穿過不修改 RZone 的 placements。
+7. `8 0 8 0` 的 `mask=1110` 會被中間的 2/4 placement 阻擋。
+8. 必須同時檢查所有空格的 tile 2 與 tile 4。
+
+Composition：
+
+9. Terminal <- A <- B <- C 每次只驗證 one-step，最終 C certificate 必須 valid。
+10. Invalid 或尚未發布的 child certificate 不得被 parent 引用。
+11. Lookup 只做 root pattern match；測試應能確認正常 lookup path 沒有 action replay。
+12. Mask 外不同但符合 pattern 的 Candidate 必須命中；mask 內任一值不同必須 miss。
+
+Solver integration：
+
+13. `rzone_mode=disabled` 維持目前 baseline。
+14. `generate` 的 root outcome、expanded nodes、Exact TT hit/store 與 DFS trace 順序必須
+    和 disabled 相同，只允許新增 RZone annotations/statistics。
+15. `lookup` 與 baseline 的 root outcome 必須相同。
+16. 同時存在 RZone 與 Exact entry 時必須由 RZone-first 命中。
+17. RZone miss 時 Exact TT fallback 必須保持正常。
+18. Shadow mode 發現 RZone Win / Exact Loss 衝突時必須立即失敗。
+
+先以 winning tile 8 做完整 correctness regression，再以 16 評估 certificate coverage、
+lookup cost 與 expanded-node reduction。第一個版本不要求立即改善 target 8 時間；主要成功
+標準是沒有 false positive、local invariants 可解釋、RZone-first 與 baseline outcome 一致。
+
+
+17. 長期取代 Exact TT 的條件
+----------------------------
+
+概念上 Exact TT 是 `mask=0xffff` 的 RZone 特例，但第一版 linear Win certificate 尚不足以
+移除 Exact TT。完全取代至少需要：
+
+1. Player Win existential slide certificate。
+2. Player Loss universal slide certificate。
+3. Environment Win universal placement certificate，允許不同 action 使用不同 child proof。
+4. Environment Loss existential placement certificate。
+5. No-legal-move terminal Loss certificate。
+6. 無法縮小時可安全產生 full-board certificate。
+7. Certificate DAG、deduplication 與有效索引。
+8. 在 target 8/16/32 上與 Exact TT baseline 的 outcome 一致性測試。
+
+最終可統一為一個 RZone Proof Table：
+
+    Unified RZone Proof Table
+      exact/full-board index   mask == 0xffff
+      partial-pattern index    mask != 0xffff
+
+這樣可以移除「獨立的 Exact TT proof system」，但仍保留 full-board hash fast path；後者只是
+同一套 RZone certificate 的效能索引，不是另一套 proof 語意。

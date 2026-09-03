@@ -401,10 +401,19 @@ SolvedBy parseSolvedBy(const std::string& text, const std::filesystem::path& pat
 {
     if (text == "NONE") return SolvedBy::None;
     if (text == "TERMINAL") return SolvedBy::Terminal;
+    if (text == "RZONE_TT") return SolvedBy::RZoneTable;
     if (text == "TT") return SolvedBy::TranspositionTable;
     if (text == "BACKPROPAGATION") return SolvedBy::Backpropagation;
     if (text == "NODE_LIMIT") return SolvedBy::NodeLimit;
     fileFail(path, "invalid solved_by: " + text);
+}
+
+RZoneStepKind parseRZoneKind(const std::string& text, const std::filesystem::path& path)
+{
+    if (text == "TERMINAL") return RZoneStepKind::Terminal;
+    if (text == "FIXED_SLIDE") return RZoneStepKind::FixedSlide;
+    if (text == "UNIVERSAL_PLACEMENT") return RZoneStepKind::UniversalPlacement;
+    fileFail(path, "invalid rzone_kind: " + text);
 }
 
 TerminalReason parseTerminalReason(const std::string& text,
@@ -497,6 +506,12 @@ struct TraceRecord {
     std::optional<std::uint64_t> tt_key;
     std::optional<std::uint64_t> tt_source_node_id;
     std::optional<std::uint8_t> tt_transform;
+    std::optional<bool> rzone_hit;
+    std::optional<RZoneCertificateId> rzone_certificate_id;
+    std::optional<RZoneStepKind> rzone_kind;
+    std::optional<std::uint16_t> rzone_mask;
+    std::optional<std::uint64_t> rzone_masked_board;
+    std::optional<std::uint32_t> rzone_depth;
     std::optional<SearchAction> selected_action;
     std::vector<SearchAction> skipped_actions;
     std::optional<int> reward;
@@ -582,6 +597,34 @@ TraceRecord parseTraceRecord(const Properties& properties,
             fileFail(path, "SGF tt_transform number and name disagree");
         }
     }
+    const auto rzone_hit = fields.find("rzone_hit");
+    if (rzone_hit != fields.end()) {
+        record.rzone_hit = parseBoolean(rzone_hit->second, "rzone_hit", path);
+    }
+    const auto rzone_certificate_id = fields.find("rzone_certificate_id");
+    if (rzone_certificate_id != fields.end()) {
+        record.rzone_certificate_id = parseUnsigned<RZoneCertificateId>(
+            rzone_certificate_id->second, "rzone_certificate_id", path);
+    }
+    const auto rzone_kind = fields.find("rzone_kind");
+    if (rzone_kind != fields.end()) {
+        record.rzone_kind = parseRZoneKind(rzone_kind->second, path);
+    }
+    const auto rzone_mask = fields.find("rzone_mask");
+    if (rzone_mask != fields.end()) {
+        record.rzone_mask = parseUnsigned<std::uint16_t>(
+            rzone_mask->second, "rzone_mask", path);
+    }
+    const auto rzone_masked_board = fields.find("rzone_masked_board");
+    if (rzone_masked_board != fields.end()) {
+        record.rzone_masked_board = parseUnsigned<std::uint64_t>(
+            rzone_masked_board->second, "rzone_masked_board", path);
+    }
+    const auto rzone_depth = fields.find("rzone_depth");
+    if (rzone_depth != fields.end()) {
+        record.rzone_depth = parseUnsigned<std::uint32_t>(
+            rzone_depth->second, "rzone_depth", path);
+    }
     return record;
 }
 
@@ -624,9 +667,40 @@ struct StateKeyHash {
     }
 };
 
+bool verifyRzArtifactBinding(const ProofManifest& manifest,
+                             const RzProofTable* rzone_table)
+{
+    if (!manifest.hasRzArtifactBinding()) return false;
+    if (!rzone_table) {
+        throw std::runtime_error(
+            "SGF binds an RZone snapshot but no .rz file was supplied");
+    }
+    if (manifest.winning_tile != rzone_table->winningTile()) {
+        throw std::runtime_error("SGF winning tile does not match RZone file");
+    }
+    if (*manifest.rz_format_version != RzFile::kFormatVersion ||
+        *manifest.rz_semantics_version != RzFile::kSemanticsVersion) {
+        throw std::runtime_error("SGF RZone format or semantics version is incompatible");
+    }
+    if (*manifest.rz_prefix_record_count > rzone_table->summary().record_count) {
+        throw std::runtime_error("SGF RZone prefix is longer than the supplied RZone file");
+    }
+    if (rzone_table->prefixChecksum(*manifest.rz_prefix_record_count) !=
+        *manifest.rz_prefix_checksum) {
+        throw std::runtime_error(
+            "SGF RZone prefix checksum does not match the supplied RZone file");
+    }
+    return true;
+}
+
 class LogicalVerifier {
 public:
-    explicit LogicalVerifier(const ProofTable& table) : table_(table) {}
+    LogicalVerifier(const ProofTable& table,
+                    const RzProofTable* rzone_table,
+                    RZoneCertificateId rzone_maximum_id)
+        : table_(table),
+          rzone_table_(rzone_table),
+          rzone_maximum_id_(rzone_maximum_id) {}
 
     ProofVerificationStatistics verify(Board root, Phase phase, Outcome expected)
     {
@@ -659,6 +733,13 @@ private:
             checkTerminal(board, phase, expected, Outcome::Win);
             return;
         }
+        if (expected == Outcome::Win && rzone_table_ &&
+            rzone_table_->findMatching(
+                board, phase, rzone_maximum_id_, table_.usesSymmetry())) {
+            ++statistics_.rzone_certificates_used;
+            return;
+        }
+
         std::vector<SlideResult> slides;
         std::vector<PlacementResult> placements;
         if (phase == Phase::Player) {
@@ -742,6 +823,8 @@ private:
     }
 
     const ProofTable& table_;
+    const RzProofTable* rzone_table_ = nullptr;
+    RZoneCertificateId rzone_maximum_id_ = kNoRZoneCertificate;
     ProofVerificationStatistics statistics_;
     std::unordered_set<StateKey, StateKeyHash> visiting_;
     std::unordered_set<StateKey, StateKeyHash> verified_;
@@ -763,11 +846,15 @@ public:
     TraceVerifier(const std::filesystem::path& path,
                   SgfPrefixParser& parser,
                   const ProofManifest& manifest,
-                  const ProofTable& table)
+                  const ProofTable& table,
+                  const RzProofTable* rzone_table,
+                  RZoneCertificateId rzone_maximum_id)
         : path_(path),
           parser_(parser),
           manifest_(manifest),
-          table_(table) {}
+          table_(table),
+          rzone_table_(rzone_table),
+          rzone_maximum_id_(rzone_maximum_id) {}
 
     TraceVerificationStatistics verify(const Properties& root_properties)
     {
@@ -965,6 +1052,49 @@ private:
         }
     }
 
+    const RzProofEntry* checkRZoneAnnotation(Board board, const TraceRecord& record)
+    {
+        const unsigned present = static_cast<unsigned>(record.rzone_hit.has_value()) +
+            static_cast<unsigned>(record.rzone_certificate_id.has_value()) +
+            static_cast<unsigned>(record.rzone_kind.has_value()) +
+            static_cast<unsigned>(record.rzone_mask.has_value()) +
+            static_cast<unsigned>(record.rzone_masked_board.has_value()) +
+            static_cast<unsigned>(record.rzone_depth.has_value());
+        const bool rzone_leaf = record.solved_by == SolvedBy::RZoneTable;
+        if (present == 0) {
+            if (rzone_leaf) fail(board, record.phase, "RZone leaf is missing its certificate annotation");
+            return nullptr;
+        }
+        if (present != 6) {
+            fail(board, record.phase, "RZone certificate annotation is incomplete");
+        }
+        if (!rzone_table_) {
+            fail(board, record.phase, "RZone annotation has no bound .rz artifact");
+        }
+        const RZoneCertificateId id = *record.rzone_certificate_id;
+        if (id == kNoRZoneCertificate || id > rzone_maximum_id_) {
+            fail(board, record.phase, "RZone certificate ID is outside the SGF-bound prefix");
+        }
+        const RzProofEntry* entry = rzone_table_->find(id);
+        if (!entry) fail(board, record.phase, "RZone certificate ID is absent from the supplied file");
+        if (!RzProofTable::matches(*entry, board, record.phase)) {
+            fail(board, record.phase, "RZone certificate does not match this board and phase");
+        }
+        if (record.outcome != Outcome::Win) {
+            fail(board, record.phase, "RZone certificate may only annotate a Win node");
+        }
+        if (entry->kind != *record.rzone_kind || entry->mask != *record.rzone_mask ||
+            entry->masked_board != *record.rzone_masked_board ||
+            entry->depth != *record.rzone_depth) {
+            fail(board, record.phase, "RZone annotation differs from the bound certificate record");
+        }
+        if (*record.rzone_hit != rzone_leaf) {
+            fail(board, record.phase, "rzone_hit disagrees with solved_by");
+        }
+        ++statistics_.rzone_annotations_checked;
+        return entry;
+    }
+
     void checkBackpropagation(Board board,
                               const TraceRecord& record,
                               const std::vector<TraceChildSummary>& children,
@@ -1086,6 +1216,38 @@ private:
         ++statistics_.tt_leaves_checked;
     }
 
+    void checkRZoneLeaf(Board board,
+                        const TraceRecord& record,
+                        const RzProofEntry& entry,
+                        const std::vector<TraceChildSummary>& children)
+    {
+        if (record.outcome != Outcome::Win || record.expanded ||
+            record.terminal_reason != TerminalReason::None || record.tt_hit ||
+            record.tt_source || record.tt_phase || record.tt_key ||
+            record.tt_source_node_id || record.tt_transform || !children.empty() ||
+            record.children_total != 0 || record.children_visited != 0 ||
+            record.children_expanded != 0 || record.children_skipped != 0 ||
+            !record.skipped_actions.empty()) {
+            fail(board, record.phase, "RZone leaf metadata or child counts are inconsistent");
+        }
+
+        std::optional<SearchAction> expected_action;
+        if (record.phase == Phase::Player) {
+            if (entry.kind != RZoneStepKind::FixedSlide || !entry.slide) {
+                fail(board, record.phase, "Player RZone leaf does not reference a FixedSlide certificate");
+            }
+            SearchAction action;
+            action.kind = SearchAction::Kind::Slide;
+            action.direction = *entry.slide;
+            expected_action = action;
+        } else if (entry.kind != RZoneStepKind::UniversalPlacement) {
+            fail(board, record.phase,
+                 "Environment RZone leaf does not reference a UniversalPlacement certificate");
+        }
+        checkSelected(board, record, expected_action);
+        ++statistics_.rzone_leaves_checked;
+    }
+
     TraceNodeSummary verifyNode(Board board, const TraceRecord& record, std::uint64_t depth)
     {
         ++statistics_.nodes_checked;
@@ -1106,6 +1268,7 @@ private:
         const std::vector<SearchAction> legal = winning
             ? std::vector<SearchAction>{}
             : legalActions(board, record.phase);
+        const RzProofEntry* rzone_entry = checkRZoneAnnotation(board, record);
 
         if (record.solved_by == SolvedBy::Terminal) {
             if (record.tt_hit || record.selected_action || !record.skipped_actions.empty() ||
@@ -1130,6 +1293,10 @@ private:
         } else if (record.solved_by == SolvedBy::TranspositionTable) {
             if (winning) fail(board, record.phase, "winning tile must terminate before TT lookup");
             checkTtLeaf(board, record, children, legal);
+        } else if (record.solved_by == SolvedBy::RZoneTable) {
+            if (winning) fail(board, record.phase, "winning tile must terminate before RZone lookup");
+            if (!rzone_entry) fail(board, record.phase, "RZone leaf lacks a valid certificate");
+            checkRZoneLeaf(board, record, *rzone_entry, children);
         } else if (record.solved_by == SolvedBy::NodeLimit) {
             if (winning || manifest_.node_limit == 0 || record.outcome != Outcome::Unknown ||
                 record.terminal_reason != TerminalReason::NodeLimit || record.expanded ||
@@ -1151,6 +1318,8 @@ private:
     SgfPrefixParser& parser_;
     const ProofManifest& manifest_;
     const ProofTable& table_;
+    const RzProofTable* rzone_table_ = nullptr;
+    RZoneCertificateId rzone_maximum_id_ = kNoRZoneCertificate;
     TraceVerificationStatistics statistics_;
 };
 
@@ -1282,6 +1451,18 @@ bool ProofManifest::hasArtifactBinding() const
     return present == 5;
 }
 
+bool ProofManifest::hasRzArtifactBinding() const
+{
+    const unsigned present = static_cast<unsigned>(rz_format_version.has_value()) +
+        static_cast<unsigned>(rz_semantics_version.has_value()) +
+        static_cast<unsigned>(rz_prefix_record_count.has_value()) +
+        static_cast<unsigned>(rz_prefix_checksum.has_value());
+    if (present != 0 && present != 4) {
+        throw std::runtime_error("SGF contains an incomplete RZone artifact binding");
+    }
+    return present == 4;
+}
+
 ProofManifest readProofManifest(const std::filesystem::path& sgf_path)
 {
     std::ifstream input(sgf_path, std::ios::in | std::ios::binary);
@@ -1337,6 +1518,8 @@ ProofManifest readProofManifest(const std::filesystem::path& sgf_path)
     }
     const auto tt_file = fields.find("tt_file");
     if (tt_file != fields.end()) manifest.declared_tt_path = tt_file->second;
+    const auto rz_file = fields.find("rz_file");
+    if (rz_file != fields.end()) manifest.declared_rz_path = rz_file->second;
 
     auto optionalNumber = [&](const char* name, auto& destination) {
         const auto found = fields.find(name);
@@ -1350,12 +1533,18 @@ ProofManifest readProofManifest(const std::filesystem::path& sgf_path)
     optionalNumber("tt_file_size", manifest.tt_file_size);
     optionalNumber("tt_player_records", manifest.tt_player_records);
     optionalNumber("tt_environment_records", manifest.tt_environment_records);
+    optionalNumber("rz_format_version", manifest.rz_format_version);
+    optionalNumber("rz_semantics_version", manifest.rz_semantics_version);
+    optionalNumber("rz_prefix_record_count", manifest.rz_prefix_record_count);
+    optionalNumber("rz_prefix_checksum", manifest.rz_prefix_checksum);
     (void)manifest.hasArtifactBinding();
+    (void)manifest.hasRzArtifactBinding();
     return manifest;
 }
 
 ProofVerificationResult verifyRootProof(const ProofManifest& manifest,
-                                        const ProofTable& table)
+                                        const ProofTable& table,
+                                        const RzProofTable* rzone_table)
 {
     if (manifest.root_outcome == Outcome::Unknown) {
         throw std::runtime_error("root outcome is UNKNOWN and cannot be verified as an exact proof");
@@ -1380,17 +1569,27 @@ ProofVerificationResult verifyRootProof(const ProofManifest& manifest,
         artifact_binding_verified = true;
     }
 
-    LogicalVerifier verifier(table);
+    const bool rzone_artifact_binding_verified =
+        verifyRzArtifactBinding(manifest, rzone_table);
+    const RZoneCertificateId rzone_maximum_id = rzone_artifact_binding_verified
+        ? static_cast<RZoneCertificateId>(*manifest.rz_prefix_record_count)
+        : kNoRZoneCertificate;
+    LogicalVerifier verifier(
+        table,
+        rzone_artifact_binding_verified ? rzone_table : nullptr,
+        rzone_maximum_id);
     ProofVerificationResult result;
     result.root_outcome = manifest.root_outcome;
     result.artifact_binding_verified = artifact_binding_verified;
+    result.rzone_artifact_binding_verified = rzone_artifact_binding_verified;
     result.statistics = verifier.verify(manifest.root_board, Phase::Player, manifest.root_outcome);
     return result;
 }
 
 TraceVerificationStatistics verifySgfTrace(const std::filesystem::path& sgf_path,
                                            const ProofManifest& manifest,
-                                           const ProofTable& table)
+                                           const ProofTable& table,
+                                           const RzProofTable* rzone_table)
 {
     if (manifest.winning_tile != table.winningTile()) {
         throw std::runtime_error("SGF winning tile does not match TT file");
@@ -1398,6 +1597,12 @@ TraceVerificationStatistics verifySgfTrace(const std::filesystem::path& sgf_path
     if (manifest.tt_symmetry != table.usesSymmetry()) {
         throw std::runtime_error("SGF TT symmetry mode does not match TT file");
     }
+    const bool rzone_artifact_binding_verified =
+        verifyRzArtifactBinding(manifest, rzone_table);
+    const RZoneCertificateId rzone_maximum_id = rzone_artifact_binding_verified
+        ? static_cast<RZoneCertificateId>(*manifest.rz_prefix_record_count)
+        : kNoRZoneCertificate;
+
     std::ifstream input(sgf_path, std::ios::in | std::ios::binary);
     if (!input) fileFail(sgf_path, "cannot open SGF file");
     SgfPrefixParser parser(sgf_path, input);
@@ -1422,7 +1627,13 @@ TraceVerificationStatistics verifySgfTrace(const std::filesystem::path& sgf_path
         fileFail(sgf_path, "fixed opening differs from the parsed proof manifest");
     }
 
-    TraceVerifier verifier(sgf_path, parser, manifest, table);
+    TraceVerifier verifier(
+        sgf_path,
+        parser,
+        manifest,
+        table,
+        rzone_artifact_binding_verified ? rzone_table : nullptr,
+        rzone_maximum_id);
     const TraceVerificationStatistics statistics = verifier.verify(root_properties);
     parser.expect(')');
     parser.expectEnd();

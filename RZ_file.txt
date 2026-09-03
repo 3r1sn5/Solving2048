@@ -1,0 +1,401 @@
+2048 Solver Persistent RZone File 規格
+=====================================
+
+文件狀態
+--------
+
+本文件定義第一版 persistent `.rz` certificate DAG snapshot，以及它與 SGF、Proof Checker
+的整合方式。In-memory RZone 的 certificate 推導、lookup 與 Solver 整合另見
+`RZone.txt`。Solver 的嚴格 load/save、SGF prefix binding 與 Proof Checker 整合均已實作。
+本版不修改 persistent `.tt` v1 格式。
+
+
+1. 第一版範圍
+-------------
+
+第一版只支援目前的 linear Win certificates。Loss、不同 Environment placements 使用
+不同 child certificates、RZone symmetry 與多檔 merge 留給新的 semantics/format
+version。
+
+
+2. `.rz` 的邏輯命題
+----------------------
+
+每份 certificate `C` 表示以下命題：
+
+    對所有合法完整盤面 B：
+      phase(B) == C.phase
+      masked(B, C.mask) == C.masked_board
+    則 B 從 Player 視角必為 Win。
+
+其中「合法完整盤面」使用 header 指定的遊戲規則、board encoding 與 winning tile。
+Environment phase 限於完成固定開局後、由合法 Player slide 產生且至少有一個合法
+placement 的 afterstate。
+
+第一版 `.rz`：
+
+- 只保存 Win certificate，不保存 Loss 或 Unknown。
+- Terminal 可適用於 Player 或 Environment phase。
+- FixedSlide 只適用於 Player phase。
+- UniversalPlacement 只適用於 Environment phase。
+- `mask` 內的 0 是必要的 empty 條件；只有 mask 外是 don't-care。
+- Certificate 不要求 mask 最小。多包含不必要格子不影響 soundness，但可能降低命中率。
+- `rzone_max_cells` 是 Solver 的資源政策，不是 proof identity，也不寫入 `.rz` header。
+  Checker 可驗證任何 1--16 cell certificate；Solver 載入時可不索引超過當次限制者。
+
+
+3. Snapshot layout
+------------------
+
+第一版使用自訂、versioned、little-endian binary snapshot：
+
+    +------------------------------+
+    | 128-byte header              |
+    +------------------------------+
+    | Certificate record id = 1    |
+    +------------------------------+
+    | Certificate record id = 2    |
+    +------------------------------+
+    | ...                          |
+    +------------------------------+
+
+Record 在檔案中的 0-based index 加一就是 `certificate_id`，所以 record 不重複保存 ID。
+ID 0 固定表示 NONE。所有 parent 必須出現在 child 之後：
+
+    Terminal:            child_id == 0
+    FixedSlide:          0 < child_id < certificate_id
+    UniversalPlacement:  0 < child_id < certificate_id
+
+這個 child-first layout 讓 dependency graph 在格式層即為 DAG，不需要以 DFS 猜測 cycle。
+Snapshot 不保存 in-memory mask index；loader 由 records 重建：
+
+    mask -> masked_board -> certificate IDs
+
+
+4. Header format
+----------------
+
+Header 固定 128 bytes：
+
+    offset 0    magic                    8 bytes: "S2048RZ" + NUL
+    offset 8    format_version           uint16 = 1
+    offset 10   header_size              uint16 = 128
+    offset 12   record_size              uint16 = 32
+    offset 14   flags                    uint16 = 0
+    offset 16   byte_order               uint32 = 0x01020304
+    offset 20   rules_version            uint32 = 1
+    offset 24   board_encoding_version   uint32 = 1
+    offset 28   rzone_semantics_version  uint32 = 1
+    offset 32   winning_tile             uint32
+    offset 36   reserved                 uint32 = 0
+    offset 40   records_offset           uint64 = 128
+    offset 48   record_count             uint64
+    offset 56   payload_size             uint64 = record_count * 32
+    offset 64   payload_crc64_ecma       uint64
+    offset 72   checksum_algorithm       uint32 = 1
+    offset 76   reserved                 52 bytes，必須全為 0
+
+`record_count` 必須不超過 `uint32` certificate ID space。Header 不保存 opening、model、
+node limit、lookup policy、max cells 或 DFS ordering，因為它們不改變 certificate 命題。
+File size 必須精確等於 `header_size + payload_size`，不可有 trailing bytes。Checksum 只
+涵蓋 record payload，沿用 `.tt` 的 CRC64-ECMA 參數：polynomial
+`0x42f0e1eba9ea3693`、initial value 0、non-reflected、final XOR 0。
+
+第一版不支援 RZone symmetry，所以 `flags` 必須為 0。Exact TT 是否使用 D4 symmetry 與
+`.rz` identity 無關；未來若 canonicalize RZone mask、masked board、slide 或 terminal
+position，必須使用新的明確 feature flag/semantics version。
+
+
+5. Certificate record format
+-----------------------------
+
+每筆 record 固定 32 bytes：
+
+    offset 0    masked_board   uint64
+    offset 8    child_id       uint32
+    offset 12   depth          uint32
+    offset 16   mask           uint16
+    offset 18   kind           uint8
+    offset 19   phase          uint8
+    offset 20   outcome        uint8
+    offset 21   argument       uint8
+    offset 22   flags          uint16 = 0
+    offset 24   reserved       uint64 = 0
+
+Encoding：
+
+    kind:
+      1 = TERMINAL
+      2 = FIXED_SLIDE
+      3 = UNIVERSAL_PLACEMENT
+
+    phase:
+      1 = PLAYER
+      2 = ENVIRONMENT
+
+    outcome:
+      1 = WIN；v1 只接受此值
+
+    argument:
+      TERMINAL             0..15 terminal position
+      FIXED_SLIDE          0..3  up, right, down, left
+      UNIVERSAL_PLACEMENT  255   NONE
+
+共同 structural invariants：
+
+- `mask != 0`。
+- `masked_board` 在 mask 外的所有 4-bit nibbles 必須為 0。
+- 每個 mask 內 nibble 必須是合法 tile rank；0 表示 empty。
+- `flags` 與 `reserved` 必須為 0。
+- `depth >= 1`；它只作 metadata 與 tie-break，不限制 certificate 長度。
+- Terminal 的 `depth == 1`；其他 kind 的 `depth == child.depth + 1`。
+- 檔案不保存 `validated`。Writer 只可輸出已驗證 certificate，reader/checker 必須自行
+  驗證後才可在記憶體設為 validated。
+
+
+6. 各 kind 的正式語意
+----------------------
+
+TERMINAL
+~~~~~~~~
+
+必須滿足：
+
+    child_id == 0
+    depth == 1
+    phase == PLAYER 或 ENVIRONMENT
+    argument 是合法 terminal_position
+    mask == (1 << terminal_position)
+    decoded_tile_value(masked_board, terminal_position) >= winning_tile
+
+因此任何符合 root pattern 的 Candidate 都已包含 winning tile，可直接證明 Win。
+
+FIXED_SLIDE
+~~~~~~~~~~~
+
+必須滿足：
+
+    phase == PLAYER
+    child.phase == ENVIRONMENT
+    child.outcome == WIN
+    argument 是合法 slide direction
+    child_id < certificate_id
+    depth == child.depth + 1
+
+其 proof obligation 是對所有符合 parent pattern 的合法盤面 `B`：
+
+    slide(B, argument) 必定合法
+    masked(slide(B, argument), child.mask) == child.masked_board
+
+Checker 必須驗證這個「所有 mask 外填法」都成立的 pattern implication，不能只在
+`Board{masked_board}` 上成功 replay 一次就接受。實作可使用與 `SLIDE_PREIMAGE_V1`
+相符的逐行 dependency analysis；parent mask 可以是 sound preimage 的 superset，不能
+要求一定是最小 mask。完成此 local obligation 並且 child 已驗證後，parent 即為 Win。
+
+UNIVERSAL_PLACEMENT
+~~~~~~~~~~~~~~~~~~~
+
+必須滿足：
+
+    phase == ENVIRONMENT
+    child.phase == PLAYER
+    child.outcome == WIN
+    argument == 255
+    child_id < certificate_id
+    depth == child.depth + 1
+    mask == child.mask
+    masked_board == child.masked_board
+    mask 內每個 tile 都 non-empty
+
+對任何符合 parent pattern 的合法 Environment state，所有 legal 2/4 placements 都只能
+發生在 mask 外，因此 placement 後仍符合相同 child pattern。Checker 仍要依 rules version
+確認 placement action space 是「每個 empty position 的 2 與 4」，不能相信檔案提供的
+children count；v1 record 也不保存 children list。
+
+
+7. Duplicate、選擇與合併語意
+-----------------------------
+
+相同 root pattern 可以有多份不同 certificate，例如不同 FixedSlide witness 或不同 child
+proof；這是合法的。完全相同的
+`(kind, phase, mask, masked_board, argument, child_id)` record 視為 duplicate，writer
+應 deduplicate，strict reader 可拒絕。
+
+Lookup 只可從已驗證 records 中選擇。現有 policy 保持：
+
+1. 優先 root mask cell count 較少者。
+2. 需要完整 tie-break 時選 depth 較短者。
+3. 再相同時選 ID 較小者。
+
+單一 Solver 載入既有 `.rz` 後，原 record IDs 保持不變，新 certificate 依序 append。
+第一版不支援任意兩份獨立 `.rz` 的直接 merge，因為 child IDs 需要 topological remap
+與重新 deduplicate；日後應以專用 merge tool 或新版本處理。
+
+
+8. Reader、writer 與發布順序
+----------------------------
+
+Reader 在發布任何 certificate/index 前必須完成：
+
+1. 驗證 magic、版本、file size、offset、payload size 與 reserved bytes。
+2. 驗證 CRC64-ECMA。
+3. 驗證 rules、board encoding、RZone semantics 與 winning tile compatibility。
+4. 依 ID 順序驗證每筆 structural invariants 與 child-first dependency。
+5. 依第 6 節驗證每筆 local proof obligation；只有成功後才標成 validated。
+6. 全部成功後才建立/發布 lookup index，避免部分載入的檔案被 Solver 使用。
+
+不加入 replay 次數、proof depth 或其他推導上限。每份 certificate 依 topological order
+只需驗證一次；後續 lookup 只做 phase 與 root pattern match。
+
+Writer 與 `.tt` 採相同 crash-safe snapshot 流程：
+
+    write <rz_path>.tmp
+      -> provisional header
+      -> records in certificate ID order
+      -> finalize checksum/header
+      -> flush and close
+      -> optional strict reopen validation
+      -> atomic rename to <rz_path>
+
+不得直接覆寫正式檔案。第一版不支援多個 process 同時寫同一 `.rz`。
+
+Solver/automation 的 artifact 發布順序固定為：
+
+    solve
+      -> save/publish final .tt
+      -> save/publish final .rz
+      -> write SGF metadata binding both snapshots
+      -> publish final SGF
+      -> Proof Checker reopen all artifacts
+
+
+9. SGF artifact binding
+-----------------------
+
+當 SGF 含 RZone certificate 或 RZone lookup leaf 時，root metadata 必須綁定當次 solve
+實際可見的 `.rz` child-first prefix：
+
+    rz_file
+    rz_format_version
+    rz_semantics_version
+    rz_prefix_record_count
+    rz_prefix_checksum
+
+`rz_prefix_checksum` 是 records `1..rz_prefix_record_count` 的 CRC64-ECMA。Checker 接受：
+
+- 與 SGF 當時完全相同的 `.rz`；或
+- 後來由其他開局繼續 append 的新版 `.rz`，前提是舊 prefix 的 count 與 checksum 仍吻合。
+
+因此 `.rz` 不綁 opening，能跨開局累積；舊 SGF 也不會因檔案尾端新增 records 而失效。
+SGF 中引用的每個 `certificate_id` 都必須小於等於 bound prefix count，不能偷用日後追加的
+certificate。`rz_file` 是供人與工具尋找檔案的描述性路徑；proof identity 由版本、prefix
+count 與 prefix checksum 決定。
+
+每個有 certificate annotation 的 SGF node 至少記錄：
+
+    rzone_certificate_id
+    rzone_kind
+    rzone_mask
+    rzone_masked_board
+    rzone_depth
+
+Checker 從 action path 自行得到目前完整 board 與 phase，再確認：
+
+- `certificate_id` 存在於綁定的 `.rz` snapshot。
+- SGF annotation 與 record 完全一致。
+- 目前 board 符合 certificate root pattern。
+- `solved_by=RZONE_TT` 時 record outcome 必須是 Win。
+- Player RZone hit 的 selected action 等於 FixedSlide argument；Environment universal hit
+  不得宣稱單一 selected placement。
+
+若 SGF 使用 RZone leaf 卻未提供相符 `.rz`，Checker 不可輸出完整 `VERIFIED`。
+
+
+10. Proof Checker 的混合 proof 語意
+------------------------------------
+
+Checker 維護兩種 memoized verification key：
+
+    Exact state:       (phase, canonical/full board, expected outcome)
+    RZone certificate: certificate_id
+
+驗證 Exact TT proof 時，每個必要 child 可由以下任一來源完成：
+
+1. 遊戲 terminal。
+2. 相符且 outcome 正確的 Exact TT entry。
+3. 當 expected outcome 是 Win 時，符合該完整盤面的 validated RZone certificate。
+
+RZone v1 不能證明 Loss，所以 expected Loss 不得以 `.rz` 補完。當 Exact TT proof 遇到
+沒有 Exact Win entry 的 child 時，Checker 可查 RZone index；任何一份適用且已驗證的
+Win certificate 都足以完成該 child obligation。
+
+若 Exact TT 使用 D4 symmetry，logical verifier 也可使用已驗證 RZone certificate 的旋轉／
+鏡射命題來銜接 canonical TT proof。這不會改寫 `.rz` record，也不代表 Solver runtime 已有
+RZone symmetry index；SGF trace 中實際發生的 `RZONE_TT` leaf 仍必須以原方向精確匹配其
+指定 record。
+
+SGF trace audit 與 root logical proof 分開但共用已載入的 artifacts：
+
+- Trace audit 驗證每個實際 `RZONE_TT` leaf 引用的指定 certificate ID。
+- Root logical verifier 驗證 root 所需的 Exact-TT/RZone proof closure。
+- 未被 SGF 或 root closure 使用的 `.rz` records 已在 strict load 時完成 local semantic
+  validation，因此不會有「檔案載入但內含未驗證 certificate」的狀態。
+
+這個流程不重新執行 Solver DFS、不使用 N-tuple value，也不在每次 lookup replay 整條
+certificate suffix。Local obligations 依 record ID 順序驗證一次，root lookup 只重用
+validated result。
+
+
+11. `.rz` v1 明確不包含的資料
+---------------------------------
+
+不得保存以下 process-local 或可重建資料：
+
+- pointer、deque/vector capacity、unordered_map bucket 或 allocator state。
+- `validated` boolean；這是 reader/checker 的結果。
+- lookup counters、hit counters、DFS node ID、source trace ID。
+- mask index、expanded nibble mask 或 hash value。
+- N-tuple value、action ordering score、node limit 或 elapsed time。
+- 完整 source board；certificate 的命題只由 root pattern 與 child obligation 決定。
+- replay budget、max depth 或任何會改變 proof validity 的資源 cutoff。
+
+第一版也不支援 compression、mmap、checkpoint、multi-process writer、RZone Loss、不同
+placement 對應不同 child、RZone D4 canonicalization 或 external signature。新增上述
+語意時必須明確增加 format/semantics version，不可靜默改寫 v1。
+
+
+12. `.rz` v1 驗收測試
+------------------------
+
+File codec：
+
+1. Empty 與 multi-record snapshot round trip 後 records/IDs 必須完全一致。
+2. Bad magic/version/size/offset、truncation、trailing bytes、checksum 與 reserved bits
+   必須拒絕。
+3. Wrong winning tile、rules、encoding 或 semantics version 必須拒絕。
+4. `record_count`、payload arithmetic 與 uint32 ID overflow 必須安全檢查。
+
+DAG/record：
+
+5. Self/forward/out-of-range child、錯誤 depth、kind/phase/argument 組合必須拒絕。
+6. Mask 外 masked-board bits、invalid terminal position 與非 Win outcome 必須拒絕。
+7. 相同 root pattern 的不同合法 proofs 可共存；完全 duplicate record 依 strict policy
+   拒絕。
+
+Semantic mutation：
+
+8. Terminal tile 未達 target 必須拒絕。
+9. FixedSlide 的 direction、parent mask、known cell 或 child pattern 任一被修改時必須拒絕。
+10. FixedSlide 只在單一 representative board 成立、但可被 mask 外填法破壞時必須拒絕。
+11. UniversalPlacement mask 含 empty、或 parent/child pattern 不同時必須拒絕。
+12. 合法多層 certificate 在沒有 depth/replay 上限下必須通過並只驗證每個 ID 一次。
+
+Integration：
+
+13. SGF binding 的 format/semantics/prefix count/prefix checksum 任一不符必須拒絕；只在
+    bound prefix 後 append records 的新版 `.rz` 必須仍可驗證舊 SGF。
+14. RZone leaf 的 ID、kind、mask、masked board、depth 或 selected action 不符必須拒絕。
+15. Root proof 可混合使用 terminal、Exact TT Win 與 RZone Win；Loss obligation 不得由
+    RZone v1 補完。
+16. 含 RZone leaf 但缺少 `.rz` 的 run 不得輸出 `Proof status: VERIFIED`。
+17. SGF node 引用超過 bound prefix 的後追加 certificate 必須拒絕。

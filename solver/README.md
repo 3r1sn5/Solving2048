@@ -25,10 +25,11 @@ winning tile  = 8
 node limit    = 0 (unlimited)
 TT            = enabled
 TT symmetry   = enabled
-persistent TT = save result/8/8_ttfile.tt
+persistent TT = save result/RZ/8_RZ.tt
+RZone         = lookup, save result/RZ/8_RZ.rz
 network       = 4x6patt
 model         = models/4x6patt.w
-SGF output    = result/8/8_ttfile.sgf
+SGF output    = result/RZ/8_RZ.sgf
 ```
 
 After building, no command-line settings are required:
@@ -57,11 +58,18 @@ use_transposition_table=true
 use_tt_symmetry=true
 load_tt=false
 save_tt=true
-tt_path=result/8/8_ttfile.tt
+tt_path=result/RZ/8_RZ.tt
+rzone_mode=lookup
+rzone_lookup_policy=smallest_first
+rzone_max_cells=16
+rzone_shadow_exact_check=false
+load_rz=false
+save_rz=true
+rz_path=result/RZ/8_RZ.rz
 opening=2@0,2@1
 network=4x6patt
 model_path=models/4x6patt.w
-sgf_path=result/8/8_ttfile.sgf
+sgf_path=result/RZ/8_RZ.sgf
 ```
 
 CLI resource flags remain optional overrides applied after cfg loading. This is
@@ -94,10 +102,10 @@ when loaded from disk. Set `use_transposition_table=false` and
 `use_tt_symmetry=false` in a separate cfg, or use `--no-tt`, to restore the
 path-expanded baseline; `--no-tt` also disables persistent load/save.
 
-The lookup order is winning terminal, exact TT, node limit, then
+The lookup order is winning terminal, RZone, exact TT, node limit, then
 expansion. Thus an already-proven entry remains usable even when the node
-budget has just been exhausted. A TT hit does not consume the expanded-node
-budget or searched-action counters. With `load_tt=true`, an existing snapshot is loaded before
+budget has just been exhausted. Neither an RZone nor exact-TT hit consumes the
+expanded-node budget or searched-action counters. With `load_tt=true`, an existing snapshot is loaded before
 search; a missing file starts with empty tables. With `save_tt=true`, all loaded
 and newly proven entries are streamed to `<tt_path>.tmp`, checksummed, and
 atomically renamed after search. The file is tied to the winning tile, rules,
@@ -119,10 +127,59 @@ solver/solver2048 --no-load-tt --save-tt   # rebuild a snapshot from an empty TT
 solver/solver2048 --load-tt --no-save-tt   # read-only use
 ```
 
+RZone snapshots use parallel controls:
+
+```bash
+solver/solver2048 --rz-file solver/rz/target16.rz --load-rz --save-rz
+solver/solver2048 --no-load-rz --save-rz   # rebuild from an empty RZone table
+solver/solver2048 --load-rz --no-save-rz   # read-only use
+```
+
+The v1 `.rz` snapshot has a 128-byte little-endian header, child-first
+32-byte certificate records, and a CRC64-ECMA payload checksum. Loading
+strictly validates the complete certificate DAG before publishing any record.
+`rzone_max_cells` only limits which loaded patterns enter the lookup index;
+all records and IDs remain available and are preserved when the file is saved
+again.
+
 Changing `--winning-tile` or TT symmetry while persistent load/save remains
 enabled requires a different compatible `--tt-file`. For a one-off mechanism
 baseline that must not read or overwrite a snapshot, use both `--no-load-tt`
 and `--no-save-tt`.
+
+### First RZone implementation
+
+`rzone_mode=generate` derives immutable Player-Win certificates during normal
+backpropagation but never looks them up. It is the control run for measuring
+certificate-generation overhead: exact-TT node and action counts remain the
+same as the RZone-disabled baseline.
+
+`rzone_mode=lookup` checks the in-memory RZone table before the exact TT. A
+matching partial board pattern returns a Win proof leaf without replay and
+without increasing expanded-node or action counts. Certificates are built by
+three local rules: a one-cell winning terminal, a fixed winning Player slide
+whose source preimage is sufficient to determine the relevant output, and an
+Environment universal-placement step whose relevant cells are all non-empty.
+The last condition guarantees every legal 2/4 placement stays outside the
+zone. `rzone_max_cells` bounds accepted certificates; certificate depth is
+recorded for diagnostics and tie-breaking but does not limit derivation.
+
+`rzone_lookup_policy=full_scan` preserves the original policy: scan every
+indexed mask and choose the globally smallest-cell certificate, then shortest
+depth and oldest ID. `smallest_first` groups masks by cell count, checks groups
+from one to sixteen cells, and returns on the first valid match. It still
+guarantees minimum cell count because every smaller group has already missed,
+but deliberately skips the depth/ID global tie-break to avoid scanning the
+remaining equal/larger masks. Each indexed mask also stores its pre-expanded
+64-bit nibble mask, so lookup performs one AND instead of rebuilding it from
+sixteen cells.
+
+This first version stores only Player-view Win proofs and does not canonicalize
+RZone patterns over symmetry in the Solver lookup index. Exact TT remains the
+fallback for Loss results and Win states whose RZone derivation stops. RZone
+certificates can be loaded, extended, and atomically saved as a `.rz` snapshot.
+SGF binds the child-first record prefix used by its solve, so another opening
+may append certificates without invalidating the older SGF.
 
 At each Player node, legal slides are searched in descending action value:
 
@@ -146,6 +203,40 @@ hits separately. `--tt-symmetry` without `--tt` is rejected.
 
 Run `solver/solver2048 --help` for all options.
 
+## Proof checker
+
+Build the first logical proof checker with:
+
+```bash
+make proof-checker
+```
+
+Verify a completed SGF/TT pair with:
+
+```bash
+solver/proof_checker \
+  --sgf result/RZ/8_RZ.sgf \
+  --tt result/RZ/8_RZ.tt \
+  --rz result/RZ/8_RZ.rz
+```
+
+The checker reopens all supplied files and independently validates both binary
+formats, checksums, and RZone certificate semantics. It streams the entire SGF
+DFS trace, independently replays every slide and placement, and verifies
+terminal classification, phase alternation, AND/OR backup,
+short-circuit/skipped actions, and every retained TT/RZone leaf. It also
+verifies the complete mixed root proof DAG from exact TT entries, terminal
+states, and RZone Win certificates, including D4 witness mapping, cycle
+detection, and memoization. It does not load the N-tuple network or call the
+Solver DFS.
+
+New SGFs bind the exact TT snapshot by format version, CRC64, byte size, and
+Player/Environment record counts. RZone binding instead uses format/semantics
+versions plus a record-prefix count and checksum. A later `.rz` containing that
+same prefix is valid, enabling append-only cross-opening reuse; SGF certificate
+IDs cannot exceed the bound prefix. Older SGFs without RZone data continue to
+verify without `--rz`. The trace parser uses memory proportional to DFS depth.
+
 ## Results
 
 All outcomes use the Player perspective:
@@ -161,22 +252,6 @@ With TT enabled, a repeated state is recorded as a `TRANSPOSITION_TABLE`
 reference leaf rather than duplicating its proven subtree. A trace-local hit
 uses `tt_source_node_id`; a persistent hit uses `tt_source=persistent`,
 `tt_phase`, and `tt_key`, because a previous process's trace ID is not valid.
-
-## Proof checker
-
-Build and run the independent SGF + TT verifier with:
-
-```bash
-make proof-checker
-solver/proof_checker --sgf result/opening.sgf --tt result/target.tt
-```
-
-The checker reloads both artifacts, validates the TT format and SGF-to-TT
-checksum binding, replays the complete retained SGF trace, and independently
-verifies the root AND/OR proof DAG. At a TT leaf it follows the entry's witness
-or complete child set according to the node phase and outcome until it reaches
-game-rule terminals. It does not load the N-tuple evaluator or call the
-solver's DFS. See `../Proof_Checker.txt` for the verification contract.
 
 ## Viewer
 

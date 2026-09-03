@@ -1,8 +1,11 @@
 #pragma once
 
 #include "game_api.h"
+#include "rzone.h"
+
 #include <cstddef>
 #include <cstdint>
+#include <filesystem>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -36,6 +39,7 @@ enum class TerminalReason {
 enum class SolvedBy {
     None,
     Terminal,
+    RZoneTable,
     TranspositionTable,
     Backpropagation,
     NodeLimit,
@@ -76,6 +80,12 @@ struct TraceNode {
     std::optional<std::uint64_t> tt_key;
     bool tt_symmetry_hit = false;
     std::optional<std::uint8_t> tt_transform;
+    bool rzone_hit = false;
+    std::optional<RZoneCertificateId> rzone_certificate_id;
+    std::optional<RZoneStepKind> rzone_kind;
+    std::optional<std::uint16_t> rzone_mask;
+    std::optional<std::uint64_t> rzone_masked_board;
+    std::optional<unsigned> rzone_depth;
     std::optional<SearchAction> incoming_action;
     std::optional<int> reward;
     std::optional<double> afterstate_value;
@@ -102,6 +112,7 @@ struct SearchStatistics {
     std::uint64_t environment_persistent_tt_hits = 0;
     std::uint64_t player_tt_loaded_entries = 0;
     std::uint64_t environment_tt_loaded_entries = 0;
+    RZoneStatistics rzone;
 
     std::uint64_t combinedNodes() const { return player_nodes + environment_nodes; }
     std::uint64_t ttHits() const { return player_tt_hits + environment_tt_hits; }
@@ -130,6 +141,10 @@ struct SolverOptions {
     std::uint64_t progress_interval = 0;
     bool use_transposition_table = false;
     bool use_tt_symmetry = false;
+    RZoneMode rzone_mode = RZoneMode::Disabled;
+    RZoneLookupPolicy rzone_lookup_policy = RZoneLookupPolicy::FullScan;
+    unsigned rzone_max_cells = 16;
+    bool rzone_shadow_exact_check = false;
 };
 
 struct SearchResult {
@@ -148,6 +163,7 @@ public:
     SearchResult solve();
 
 private:
+    friend class RzFile;
     friend class TtFile;
 
     struct OrderedSlide {
@@ -171,6 +187,13 @@ private:
     void assignTraceId(TraceNode& trace);
     bool lookupPlayerTransposition(Board board, TraceNode& trace);
     bool lookupEnvironmentTransposition(Board afterstate, TraceNode& trace);
+    bool lookupRZone(Board board, Phase phase, TraceNode& trace);
+    void annotateRZone(TraceNode& trace, RZoneCertificateId id, bool hit);
+    void createTerminalRZone(Board board, TraceNode& trace);
+    void liftPlayerRZone(
+        Board board, Direction direction, const TraceNode& child, TraceNode& trace);
+    void liftEnvironmentRZone(Board board, TraceNode& trace);
+    void validateRZoneAgainstExact(Board board, Phase phase) const;
     void storePlayerTransposition(Board board, const TraceNode& trace);
     void storeEnvironmentTransposition(Board afterstate, const TraceNode& trace);
     CanonicalBoard transpositionKey(Board board) const;
@@ -182,6 +205,7 @@ private:
     const Game& game_;
     SolverOptions options_;
     ProgressCallback progress_;
+    RZoneTable rzone_table_;
     SearchStatistics statistics_;
     std::uint64_t next_trace_id_ = 0;
     bool solve_started_ = false;

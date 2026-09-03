@@ -1,157 +1,411 @@
 2048 Solver Proof Checker 規格
 ==============================
 
-1. 目的
--------
+文件狀態
+--------
 
-Proof Checker 是獨立 executable，用 Solver 產生的 SGF 與 persistent TT 驗證該次
-solving 宣稱的 Win/Loss 是否正確：
+本文件整理 Proof Checker 的目的、信任邊界與驗證演算法。Checker 使用單次 solve 的
+SGF，加上跨開局共用的 persistent TT 與 RZone files，驗證 Solver 宣稱的 Win/Loss。
 
-    ./solver/proof_checker --sgf result/opening.sgf --tt result/target.tt
+第一版已實作：
 
-Checker 不使用 value network，也不呼叫 Solver 的 DFS。它只信任 2048 遊戲規則，並重新
-讀取已經關檔的 SGF/TT，因此 serialization、checksum、trace 與 AND/OR 邏輯都在驗證範圍。
+- `solver/proof_checker` 獨立 executable。
+- 獨立 TT v1 binary reader、header/record/CRC64 integrity validation。
+- 從 SGF prefix 讀取兩個 opening placements、root outcome、winning tile 與 symmetry mode。
+- 新 SGF 以 TT format version、payload checksum、file size、Player/Environment counts 綁定
+  實際 snapshot。
+- 從固定開局 Player root 驗證完整 AND/OR logical proof DAG。
+- existential witness、universal children enumeration、terminal、D4 action mapping、memoization
+  與 cycle detection。
+- 串流解析完整 SGF DFS trace，逐 node 重播 action/board、phase、terminal、AND/OR
+  back propagation、short-circuit、skipped actions 與 TT leaves。
+- Target 8 SGF + symmetry TT end-to-end test，以及損壞 DFS order rejection test。
+- 獨立 `.rz` reader、CRC、child-first DAG 與 local certificate semantics validation。
+- SGF 對 append-only `.rz` prefix 的 count/checksum binding。
+- SGF RZone annotation/lookup leaf 與 Exact-TT/RZone mixed root proof validation。
+- 跨開局 append 後仍能驗證舊 SGF，且拒絕引用 bound prefix 以後的 certificate。
 
+尚未實作：
 
-2. 輸入的分工
--------------
-
-SGF 保存單次 search trace：
-
-- 固定開局與 root outcome。
-- 實際走過的 Player slide、Environment placement 與 DFS 順序。
-- terminal、back propagation、node limit、skipped actions 與 TT lookup leaf。
-
-TT 保存跨開局共用的 exact proof entries：
-
-- `(canonical board, phase)` 對應的 Win/Loss。
-- existential case 使用的 witness action。
-- 該 state 的合法 child 數量。
-
-SGF 遇到 TT lookup 時不會重複保存該 entry 的完整 subtree；Checker 會從 TT entry 繼續按需
-驗證其 logical proof DAG。
-
-
-3. AND/OR 語意
--------------
-
-所有 outcome 都採 Player 視角：
-
-    Player Win         至少一個合法 slide child 是 Win
-    Player Loss        所有合法 slide children 都是 Loss
-    Environment Win    所有合法 placement children 都是 Win
-    Environment Loss   至少一個合法 placement child 是 Loss
-
-因此 Player Win 與 Environment Loss 只需驗證合法 witness；Player Loss 與 Environment
-Win 則必須驗證所有合法 children。
-
-Terminal 由 Checker 依規則重新判斷：盤面已有 winning tile 是 Win；Player 沒有合法 slide
-是 Loss。`UNKNOWN` 不能構成 exact proof。
+- `--check-all` 稽核未被 root proof closure 使用的 TT records。
+- verified proof SGF export。
+- Solver 完成後自動呼叫 checker；目前由使用者另行執行 checker。
 
 
-4. 兩種 SGF scenario
---------------------
+1. 核心結論
+-----------
 
-自然 search 到 terminal：
+驗證 solving 不需要先在記憶體建立完整 proof-tree data structure。Checker 可以從 SGF
+root 做 DFS，遇到 TT leaf 時以 `(canonical board, phase)` 查 persistent TT，再依 2048
+規則按需產生 children。
 
-1. Checker 從 opening 沿 SGF action path 重建盤面。
-2. 重新執行該 action，確認 action、reward、board 與 phase 合法。
-3. 重新判斷 terminal reason 與 Win/Loss。
-4. 逐層核對 AND/OR back propagation、short-circuit 與 skipped actions。
+TT 表示的邏輯結構通常是 DAG，因為多條 action paths 可能抵達同一個 state。若強制展開
+成 tree，同一 state 會被複製很多次；Checker 使用 memoization 驗證 DAG 即可。
 
-Lookup 到 TT entry：
+需要區分：
 
-1. Checker 從 SGF path 得到 lookup 當下的 board 與 phase。
-2. 自行 canonicalize board，核對 SGF 的 `tt_phase`、`tt_key` 與 transform。
-3. 在 supplied TT 查找同一 entry，核對 outcome、children count 與 witness。
-4. 從該 state 展開遊戲規則，遞迴驗證 TT 中所描述的 AND/OR proof，直到 terminal。
-
-因此不能只證明 TT entry 有任意一條 path 到 terminal；該 entry 必須符合其 phase/outcome
-要求的 existential 或 universal subtree。
+- 原始 search trace：Solver 實際的 DFS 順序、short-circuit、TT hit 位置；由 SGF 保存。
+- Logical proof：為什麼 root 是 Win/Loss；可由 SGF + TT + 遊戲規則重新驗證。
+- Reconstructed proof tree/DAG：Checker 可選擇輸出，但不是進行驗證的前置條件。
 
 
-5. TT logical proof 驗證
------------------------
+2. 為什麼同時使用 SGF 與 TT
+----------------------------
 
-Checker 對 `(board, phase, expected outcome)` 做按需 DFS：
+TT-only 足以驗證「指定 root outcome 是否存在一個有效 AND/OR proof」，但不知道 Solver
+那次如何從固定開局走到各 trace node。
 
-    verify(board, phase, expected):
-        若是 terminal：重新判斷並核對 expected
-        否則：
-            canonicalize board
-            讀取同 phase 的 TT entry
-            核對 outcome 與自行列舉的 children_total
+SGF + TT 可以額外驗證：
 
-            Player Win：驗證 witness slide child
-            Player Loss：驗證所有 slide children
-            Environment Win：驗證所有 placement children
-            Environment Loss：驗證 witness placement child
+- SGF 固定開局、root phase 與 winning tile 是否正確。
+- 每個 Player slide 與 Environment placement 是否合法。
+- action path 重建的 board 是否一致。
+- 實際 children 與 AND/OR back propagation 是否正確。
+- short-circuit 後標示的 Skipped actions 是否合理。
+- `solved_by=TT` 是否命中同 phase、同 canonical board、同 outcome 的 persistent entry。
+- TT leaf 後方沒有寫入 SGF 的 subtree 是否真的能證明該 outcome。
+- 最終 SGF root 宣稱的 Win/Loss 是否可追溯到合法 terminal states。
 
-`verified` memoization 避免 DAG 中相同 state 被重複驗證；`visiting` 集合拒絕循環 proof。
-未被 root proof closure 使用的額外 TT entries 不影響本次驗證。
-
-
-6. SGF trace 驗證
-----------------
-
-Checker 串流讀取 SGF，不需要先將整棵 trace 載入記憶體。它會檢查：
-
-- 兩個 opening placements 不重疊，且 root 是 Player phase。
-- `B[0..3]` 是合法 slide；`W[4..35]` 是合法 placement。
-- phase、node ID、DFS visit/order 與 variation nesting 一致。
-- terminal、TT、back propagation、node-limit metadata 互相一致。
-- visited/skipped action partition 等於完整合法 action set。
-- Player Win 或 Environment Loss 在 decisive child 後正確 short-circuit。
-- Player Loss 或 Environment Win 已走完所有必要 children。
-- `NODE_LIMIT` 只能產生 Unknown，不能冒充 Loss。
-
-Player action 的搜尋順序由 value network 決定。Checker 不載入 network，因此只驗證 action
-集合、DFS/short-circuit 邏輯，不重新計算 Player sibling 的 value 排序。
+SGF 不是 persistent TT 的替代品。它可能非常大、包含單次執行 trace id，而且 TT hit 後
+通常不複製 subtree。TT 也不是原始 SGF 的替代品；它不保留 traverse order 或當時哪次
+lookup 成為 hit。
 
 
-7. Artifact binding
+3. Checker 的獨立性
 -------------------
 
-新 SGF 可記錄 TT 的：
+Proof Checker 應是獨立 executable，例如：
 
-- format version
-- payload CRC64 checksum
-- file size
-- Player record count
-- Environment record count
+    ./solver/proof_checker --tt solver/tt/target16.tt \
+                           --rz solver/rz/target16.rz \
+                           --sgf solver/results/opening_a.sgf
 
-五個欄位必須全部存在或全部省略。存在時，Checker 會確認 supplied `.tt` 正是該 SGF 所
-綁定的 snapshot；舊的 unbound SGF 仍可驗證邏輯，但輸出會顯示 artifact binding unavailable。
+Solver 的自動驗證必須在 TT/SGF 關檔後重新開啟檔案，不能直接檢查 Solver 尚在記憶體中的
+objects。這能涵蓋 serialization、截斷、checksum、SGF writer 與重新讀取問題。
 
+Checker 不得呼叫 Solver 的 DFS、TT lookup/back propagation 或 N-tuple evaluator。Value
+function 只決定搜尋順序，不屬於 proof。
 
-8. TT reader 的信任邊界
------------------------
-
-Checker 使用自己的 TT binary reader，驗證 magic、version、endianness、rules、board encoding、
-winning tile、symmetry mode、section offsets/counts、reserved bits、record semantics 與 CRC64。
-
-TT entry 只能是 exact Win/Loss。非法 witness、non-canonical symmetry key、duplicate key、
-截斷、額外資料或 checksum mismatch 都會使驗證失敗。
+遊戲 mechanics 可以先使用小而穩定的 board API，但 verifier 的 action enumeration、
+terminal 判斷與 AND/OR verification control flow 應與 Solver 分離。若要提高對 shared-bug
+的信心，可再加入一份簡單的 reference move generator 或以 exhaustive small-state tests
+交叉驗證共用 board API。
 
 
-9. 成功與失敗
--------------
+4. AND/OR proof 語意
+--------------------
 
-成功時輸出包括：
+所有 outcome 固定採 Player 視角。
+
+Player 是 OR node：
+
+    Player Win   <=> 至少一個合法 slide child 是 Win
+    Player Loss  <=> 所有合法 slide children 都是 Loss
+
+Environment 是 AND node，命題仍是「Player 能贏」：
+
+    Environment Win   <=> 所有合法 placements 都是 Win
+    Environment Loss  <=> 至少一個 placement child 是 Loss
+
+因此 Checker 需要驗證的 proof edges 為：
+
+    +-------------------+---------+--------------------------------------+
+    | Phase             | Outcome | 必須驗證                             |
+    +-------------------+---------+--------------------------------------+
+    | Player OR         | Win     | 一個合法 slide witness 是 Win       |
+    | Player OR         | Loss    | 所有合法 slides 都是 Loss           |
+    | Environment AND   | Win     | 所有合法 placements 都是 Win        |
+    | Environment AND   | Loss    | 一個合法 placement witness 是 Loss  |
+    +-------------------+---------+--------------------------------------+
+
+Player Win 與 Environment Loss 是 existential proof；Player Loss 與 Environment Win 是
+universal proof。
+
+
+5. Terminal 與 action enumeration
+---------------------------------
+
+Checker 必須自己依 header/SGF 規則判定 terminal，不可只相信 TT 或 SGF comment：
+
+- 盤面已達 winning tile：Win。
+- Player phase 沒有任何合法 slide：Loss。
+
+Winning-tile terminal 的檢查順序應與 Solver 規格一致。Environment placement 必須列舉
+每個空格的 tile 2 與 tile 4；目前固定順序是 position 0..15，每個位置先 2 再 4。
+Proof correctness 不依賴 traversal order，但 SGF trace validation 需要核對記錄的順序。
+
+Checker 不得以 SGF/TT 的 `children_total` 代替自行列舉。兩者不一致時應報錯並顯示 board、
+phase、recorded count 與 generated count。
+
+
+6. TT semantic verification 演算法
+---------------------------------
+
+Checker 對 `(board, phase, expected_outcome)` 做按需 DFS。概念 pseudocode：
+
+    verify(board, phase, expected):
+        terminal = independentlyEvaluateTerminal(board, phase)
+        if terminal exists:
+            require terminal == expected
+            return VERIFIED
+
+        canonical = canonicalize(board)
+        entry = tt.lookup(phase, canonical.key)
+        require entry exists
+        require entry.outcome == expected
+
+        state = (canonical.key, phase)
+        if state in verified:
+            return VERIFIED
+        if state in visiting:
+            fail "cyclic proof"
+        add state to visiting
+
+        if phase == Player and expected == Win:
+            require canonical Player witness
+            map witness back to current orientation
+            require slide is legal
+            verify(afterstate, Environment, Win)
+
+        if phase == Player and expected == Loss:
+            slides = generate every legal slide
+            require slides is non-empty
+            for child in slides:
+                verify(child.afterstate, Environment, Loss)
+
+        if phase == Environment and expected == Win:
+            placements = generate every legal placement
+            for child in placements:
+                verify(child.board, Player, Win)
+
+        if phase == Environment and expected == Loss:
+            require canonical placement witness
+            map witness back to current orientation
+            require placement is legal
+            verify(child.board, Player, Loss)
+
+        remove state from visiting
+        add state to verified
+        return VERIFIED
+
+`verified` 避免同一 DAG node 重複驗證；`visiting` 防止檔案用 A 依賴 B、B 又依賴 A 的循環
+宣稱冒充 proof。即使目前遊戲的 tile sum 性質預期排除 cycle，Checker 仍需防禦損壞或惡意
+輸入。
+
+若 nonterminal child 所需 entry 不在 TT，root proof 不完整，必須失敗。TT 中存在許多未被
+root proof 使用的額外 entries 則不影響 root verification。
+
+
+7. SGF trace 驗證
+-----------------
+
+Checker 先讀 SGF header/opening，沿每條實際 variation 重建 board，不依賴每個 node 重複
+保存 board，也不在記憶體另建整棵 tree。已實作檢查：
+
+1. Opening placements 合法，完成後 root 是 Player phase。
+2. `B[0..3]` 是合法 Player slide，child 是對應 Environment afterstate。
+3. `W[4..35]` 是合法 Environment placement，child 是對應 Player board。
+4. `node_type`、incoming action 與 phase alternating 一致。
+5. `solver_status` 只有 Win/Loss/Unknown，且 terminal comment 與實際盤面一致。
+6. `children_total/visited/skipped` 與合法 action set、SGF variations 及 skipped action list 一致。
+7. SGF variation 順序與 `dfs_order`、`dfs_visit_order` 的宣稱一致。
+8. `solved_by=BACKPROPAGATION` 符合已訪問 children 與正確 short-circuit 規則。
+9. `solved_by=NODE_LIMIT` 只能是 Unknown，不可當成 Loss。
+10. `solved_by=TT` 必須是 Win/Loss，且不得被當成 terminal 或 Unknown。
+
+Player action 的實際排序由 `reward + V(afterstate)` 決定。Checker 刻意不載入 N-tuple
+network，因此會驗證 visited/skipped action partition、連續 sibling `dfs_order`、全域
+`dfs_visit_order` 與 short-circuit，但不重新計算 Player action 的 value 排序。Environment
+actions 不依賴 value function，因此會另外核對 generator order。
+
+正常 back propagation 的 short-circuit：
+
+- Player 一旦找到 Win child，可以跳過其餘 actions。
+- Environment 一旦找到 Loss child，可以跳過其餘 placements。
+- Player 宣稱 Loss，必須已驗證所有合法 slides 都是 Loss。
+- Environment 宣稱 Win，必須已驗證所有 placements 都是 Win。
+- 若 outcome 是 Unknown，必須符合目前 Unknown propagation 規則，不能以 skipped branch
+  掩蓋尚未證明的 universal condition。
+
+
+8. SGF TT hit 與 persistent TT 的交叉驗證
+-----------------------------------------
+
+每個 persistent TT reference leaf 至少需要：
+
+    tt_source = persistent
+    tt_phase
+    tt_key
+    tt_transform
+    solver_status
+
+Checker 從 SGF action path 得到目前 board 後：
+
+1. 自行 canonicalize board。
+2. 確認產生的 key 等於 SGF `tt_key`。
+3. 確認 phase 與 SGF `tt_phase` 相同。
+4. 查 TT file，確認 entry 存在且 outcome 等於 `solver_status`。
+5. 從該 state 呼叫 TT semantic verifier，補完 SGF 沒有展開的 proof。
+
+`tt_source_node_id` 若存在，只作為單次 SGF viewer/debug reference。跨開局或跨執行驗證
+不能依賴它。目前串流 checker 驗證 trace-local source id 小於 hit node id，再以 canonical
+key、phase、outcome、children_total 與 witness 對 final TT snapshot 做實質驗證；它不保留
+所有先前 node id 到 board 的索引，因此不直接證明該 debug source id 指向同一盤面。
+
+
+9. 驗證模式
+-----------
+
+建議提供三種模式：
+
+Root proof（預設）：
+
+    proof_checker --tt target16.tt --sgf opening_a.sgf
+
+驗證 SGF trace、所有碰到的 TT references，以及 SGF root 所需的完整 proof closure。
+
+TT-only root：
+
+    proof_checker --tt target16.tt \
+                  --root-board <encoded-board> \
+                  --root-phase player \
+                  --expected win
+
+不驗證原始 DFS trace，但可以證明指定 state 的 outcome。若要避免 CLI root 與設定抄錯，
+較推薦由一份小型 run manifest 或 SGF header提供 root。
+
+Full TT audit：
+
+    proof_checker --tt target16.tt --check-all
+
+逐筆把 TT entry 當成 verification root。這能找出未進入本次 root proof closure 的錯誤
+entries，成本高於預設模式，適合測試、release solve 或離線稽核。
+
+若只提供 SGF、其中又包含 TT leaf，但沒有對應 TT file，Checker 最多只能做 trace/format
+檢查，不能宣稱 root proof 已完整驗證。
+
+
+10. 自動化時機與發布順序
+------------------------
+
+建議 Solver 完成後執行：
+
+    Solver 得到 Win/Loss/Unknown
+      -> 將 in-memory exact TT 寫到 `<tt_path>.tmp`
+      -> 完成 checksum，close，atomic rename 成正式 `.tt`
+      -> 完成 SGF temporary file，close，發布正式 `.sgf`
+      -> Proof Checker 重新開啟 `.tt` 與 `.sgf`
+      -> integrity + trace + TT references + root proof
+      -> 成功才輸出 VERIFIED
+
+若 SGF 很大，可把 compact proof SGF 與完整 search trace 分開，讓自動 proof verification
+不必解析數 GiB 的 debug trace；但在格式拆分前，第一版仍以現有 SGF + TT 完整檢查為準。
+
+Unknown root 可保存其 SGF 與本次累積的 exact TT entries，但不可輸出 VERIFIED Win/Loss。
+
+Checker 失敗時 Solver/automation 必須回傳 non-zero exit status。不可因 Solver 自己輸出 Win
+就忽略 verifier failure。
+
+
+11. 輸出與錯誤診斷
+-------------------
+
+成功輸出至少包含：
 
     TT integrity: PASS
-    SGF root manifest: PASS
+    SGF legality: PASS
+    SGF/TT references: PASS
     AND/OR root proof: PASS
-    Complete SGF trace audit: PASS
+    Root outcome: WIN
     Proof status: VERIFIED
+    TT records visited
+    terminal states checked
+    witness edges checked
+    universal edges checked
+    memoized verification hits
 
-任何檢查失敗都回傳 non-zero exit status，並指出第一個可重現的 board、phase 與錯誤原因。
+失敗輸出必須指出第一個可重現問題：
+
+    phase
+    raw board 與 canonical key
+    expected/recorded outcome
+    SGF node id（若存在）
+    action/witness（若相關）
+    error category
+
+例如：
+
+    Proof status: FAILED
+    Error: missing universal child
+    Phase: ENVIRONMENT
+    Board: 0x...
+    Required action: place 4 at position 13
 
 
-10. 尚未包含
+12. 必要測試
 ------------
 
-- RZone file 與 RZone lookup proof 驗證。
-- `--check-all` 稽核未被 root proof 使用的 TT records。
-- verified proof SGF export。
-- Solver 結束後自動執行 checker。
+TT format/integrity：
+
+- 正常空 table、小型 table、target-8 full table round trip。
+- magic/version/endianness/rules/winning tile/symmetry 不相容。
+- truncated header、truncated payload、錯誤 count/offset/record size。
+- checksum corruption。
+- Unknown outcome、非法 witness、non-canonical key、reserved bits 非零。
+- duplicate same entry 與 duplicate conflicting outcome。
+
+Proof semantics：
+
+- Player Win 的合法/非法/錯誤 outcome witness。
+- Player Loss 缺少一個合法 slide child。
+- Environment Win 缺少一個 placement 或漏列 tile 4。
+- Environment Loss 的合法/非法/錯誤 outcome witness。
+- winning tile 與 no-legal-move terminal。
+- missing nonterminal TT child。
+- cycle detection。
+- D4 八種盤面的 key 相同，slide/placement witness 正確 inverse transform。
+
+SGF + TT：
+
+- opening、phase、action path 與 reconstructed board。
+- normal back propagation、short-circuit 與 skipped actions。
+- Unknown/node-limit 不被接受為 exact proof。
+- persistent TT hit 的 key/phase/outcome mismatch。
+- trace-local `tt_source_node_id` 不存在時，persistent key 仍能驗證。
+- SGF 宣稱 Win 但 TT closure 不完整時必須失敗。
+
+Corruption tests 應直接修改一個原本有效的小型 fixture，確認每一類錯誤都被 Checker 拒絕，
+且錯誤訊息足以定位 board/action。
+
+
+13. 可選的 proof reconstruction
+-------------------------------
+
+Checker 驗證成功後可提供：
+
+    proof_checker --tt target16.tt --sgf opening_a.sgf \
+                  --export-proof-sgf verified_proof.sgf
+
+輸出的不是原始 DFS trace，而是由已驗證 TT 重建的 logical proof：
+
+- existential node 只輸出 witness child。
+- universal node 輸出所有合法 children。
+- transposition 以 canonical key/reference 表示，避免無限複製 DAG。
+
+這個功能方便 viewer 顯示「為什麼結果成立」，但不是第一版 verifier 的必要條件，也不能
+取代原始 SGF 對 DFS traverse order、TT hit 位置與 solver debugging 的記錄。
+
+
+14. 實作進度
+------------
+
+1. Strict TT reader 與 checksum/integrity validation：已完成。
+2. TT semantic verifier，包含 memoization、cycle detection 與 D4 witness mapping：已完成。
+3. SGF root manifest parser：已完成。
+4. SGF/TT artifact checksum binding：已完成。
+5. 從 SGF fixed-opening root 執行完整 proof closure verification：已完成。
+6. 完整 SGF trace streaming replay validation：已完成。
+7. Solver 完成後自動呼叫 checker：未完成；目前為獨立命令。
+8. Target 8 end-to-end、錯誤 DFS order、錯誤 root claim 與 artifact mismatch tests：已完成。
+9. Target 16 的檔案大小、載入時間、驗證時間與 peak memory benchmark：未完成。
+10. RZone strict reader、SGF prefix binding、trace leaf 與 mixed root proof：已完成。

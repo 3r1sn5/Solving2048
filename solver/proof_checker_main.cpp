@@ -4,6 +4,7 @@
 #include <filesystem>
 #include <iomanip>
 #include <iostream>
+#include <optional>
 #include <stdexcept>
 #include <string>
 
@@ -12,6 +13,7 @@ namespace {
 struct CommandLine {
     std::filesystem::path sgf_path;
     std::filesystem::path tt_path;
+    std::filesystem::path rz_path;
     bool help = false;
 };
 
@@ -24,7 +26,7 @@ CommandLine parseCommandLine(int argc, char** argv)
             command.help = true;
             return command;
         }
-        if (option != "--sgf" && option != "--tt") {
+        if (option != "--sgf" && option != "--tt" && option != "--rz") {
             throw std::invalid_argument("unknown option: " + option);
         }
         if (++index >= argc) throw std::invalid_argument("missing value after " + option);
@@ -34,6 +36,9 @@ CommandLine parseCommandLine(int argc, char** argv)
         } else if (option == "--tt") {
             if (!command.tt_path.empty()) throw std::invalid_argument("--tt may only be specified once");
             command.tt_path = argv[index];
+        } else {
+            if (!command.rz_path.empty()) throw std::invalid_argument("--rz may only be specified once");
+            command.rz_path = argv[index];
         }
     }
     if (command.sgf_path.empty()) throw std::invalid_argument("--sgf is required");
@@ -44,12 +49,12 @@ CommandLine parseCommandLine(int argc, char** argv)
 void printHelp(const char* program)
 {
     std::cout
-        << "Usage: " << program << " --sgf PATH --tt PATH\n\n"
+        << "Usage: " << program << " --sgf PATH --tt PATH [--rz PATH]\n\n"
         << "Verify the exact root Win/Loss proof declared by a solver SGF against a\n"
-        << "persistent TT snapshot.\n"
+        << "persistent TT snapshot and, when bound by the SGF, an RZone snapshot.\n"
         << "The checker audits every retained SGF DFS node, independently replays\n"
-        << "actions and AND/OR backup rules, checks TT leaves, and verifies the\n"
-        << "complete logical proof DAG.\n";
+        << "actions and AND/OR backup rules, checks TT/RZone leaves, and verifies\n"
+        << "the complete mixed logical proof DAG.\n";
 }
 
 const char* proofOutcomeName(solver2048::Outcome outcome)
@@ -72,24 +77,43 @@ int main(int argc, char** argv)
 
         const solver2048::ProofManifest manifest =
             solver2048::readProofManifest(command.sgf_path);
+        if (manifest.hasRzArtifactBinding() && command.rz_path.empty()) {
+            throw std::invalid_argument("--rz is required because the SGF binds an RZone prefix");
+        }
 
         const auto load_started = std::chrono::steady_clock::now();
         const solver2048::ProofTable table = solver2048::ProofTable::load(command.tt_path);
         const double tt_load_elapsed = std::chrono::duration<double>(
             std::chrono::steady_clock::now() - load_started).count();
+        std::optional<solver2048::RzProofTable> rzone_table;
+        double rz_load_elapsed = 0;
+        if (!command.rz_path.empty()) {
+            const auto rz_load_started = std::chrono::steady_clock::now();
+            rzone_table = solver2048::RzProofTable::load(command.rz_path);
+            rz_load_elapsed = std::chrono::duration<double>(
+                std::chrono::steady_clock::now() - rz_load_started).count();
+        }
+
         const auto verify_started = std::chrono::steady_clock::now();
+        const solver2048::RzProofTable* rzone = rzone_table ? &*rzone_table : nullptr;
         const solver2048::ProofVerificationResult result =
-            solver2048::verifyRootProof(manifest, table);
+            solver2048::verifyRootProof(manifest, table, rzone);
         const solver2048::TraceVerificationStatistics trace =
-            solver2048::verifySgfTrace(command.sgf_path, manifest, table);
+            solver2048::verifySgfTrace(command.sgf_path, manifest, table, rzone);
         const double verify_elapsed = std::chrono::duration<double>(
             std::chrono::steady_clock::now() - verify_started).count();
 
         const auto& stats = result.statistics;
         std::cout << "TT integrity: PASS\n"
+                  << "RZone integrity: " << (rzone_table ? "PASS" : "NOT SUPPLIED") << '\n'
                   << "SGF root manifest: PASS\n"
                   << "Artifact binding: "
                   << (result.artifact_binding_verified ? "PASS" : "UNAVAILABLE (legacy/unbound SGF)")
+                  << '\n'
+                  << "RZone prefix binding: "
+                  << (result.rzone_artifact_binding_verified
+                          ? "PASS"
+                          : "UNAVAILABLE (unbound SGF)")
                   << '\n'
                   << "AND/OR root proof: PASS\n"
                   << "Complete SGF trace audit: PASS\n"
@@ -99,6 +123,8 @@ int main(int argc, char** argv)
                   << "Terminal states checked: " << stats.terminal_states_checked << '\n'
                   << "Witness edges checked: " << stats.witness_edges_checked << '\n'
                   << "Universal edges checked: " << stats.universal_edges_checked << '\n'
+                  << "RZone certificates used by root proof: "
+                  << stats.rzone_certificates_used << '\n'
                   << "Memoized verification hits: " << stats.memoized_verification_hits << '\n'
                   << "Maximum proof depth: " << stats.maximum_depth << '\n'
                   << "Trace nodes checked: " << trace.nodes_checked << '\n'
@@ -107,11 +133,15 @@ int main(int argc, char** argv)
                   << "Trace backpropagation nodes checked: "
                   << trace.backpropagation_nodes_checked << '\n'
                   << "Trace TT leaves checked: " << trace.tt_leaves_checked << '\n'
+                  << "Trace RZone leaves checked: " << trace.rzone_leaves_checked << '\n'
+                  << "Trace RZone annotations checked: "
+                  << trace.rzone_annotations_checked << '\n'
                   << "Trace node-limit leaves checked: " << trace.node_limit_leaves_checked << '\n'
                   << "Trace skipped actions checked: " << trace.skipped_actions_checked << '\n'
                   << "Maximum trace depth: " << trace.maximum_depth << '\n'
                   << std::fixed << std::setprecision(6)
                   << "TT load elapsed: " << tt_load_elapsed << "s\n"
+                  << "RZone load elapsed: " << rz_load_elapsed << "s\n"
                   << "Proof + trace verify elapsed: " << verify_elapsed << "s\n";
         return 0;
     } catch (const std::exception& error) {

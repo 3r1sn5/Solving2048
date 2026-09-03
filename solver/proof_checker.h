@@ -1,6 +1,7 @@
 #pragma once
 
 #include "search.h"
+#include "rz_proof_file.h"
 #include "tt_file.h"
 
 #include <array>
@@ -48,8 +49,14 @@ struct ProofManifest {
     std::optional<std::uint64_t> tt_file_size;
     std::optional<std::uint64_t> tt_player_records;
     std::optional<std::uint64_t> tt_environment_records;
+    std::filesystem::path declared_rz_path;
+    std::optional<std::uint16_t> rz_format_version;
+    std::optional<std::uint32_t> rz_semantics_version;
+    std::optional<std::uint64_t> rz_prefix_record_count;
+    std::optional<std::uint64_t> rz_prefix_checksum;
 
     bool hasArtifactBinding() const;
+    bool hasRzArtifactBinding() const;
 };
 
 ProofManifest readProofManifest(const std::filesystem::path& sgf_path);
@@ -59,6 +66,7 @@ struct ProofVerificationStatistics {
     std::uint64_t terminal_states_checked = 0;
     std::uint64_t witness_edges_checked = 0;
     std::uint64_t universal_edges_checked = 0;
+    std::uint64_t rzone_certificates_used = 0;
     std::uint64_t memoized_verification_hits = 0;
     std::uint64_t maximum_depth = 0;
 };
@@ -66,11 +74,14 @@ struct ProofVerificationStatistics {
 struct ProofVerificationResult {
     Outcome root_outcome = Outcome::Unknown;
     bool artifact_binding_verified = false;
+    bool rzone_artifact_binding_verified = false;
     ProofVerificationStatistics statistics;
 };
 
-ProofVerificationResult verifyRootProof(const ProofManifest& manifest,
-                                        const ProofTable& table);
+ProofVerificationResult verifyRootProof(
+    const ProofManifest& manifest,
+    const ProofTable& table,
+    const RzProofTable* rzone_table = nullptr);
 
 struct TraceVerificationStatistics {
     std::uint64_t nodes_checked = 0;
@@ -78,6 +89,8 @@ struct TraceVerificationStatistics {
     std::uint64_t terminal_nodes_checked = 0;
     std::uint64_t backpropagation_nodes_checked = 0;
     std::uint64_t tt_leaves_checked = 0;
+    std::uint64_t rzone_leaves_checked = 0;
+    std::uint64_t rzone_annotations_checked = 0;
     std::uint64_t node_limit_leaves_checked = 0;
     std::uint64_t skipped_actions_checked = 0;
     std::uint64_t maximum_depth = 0;
@@ -85,6 +98,7 @@ struct TraceVerificationStatistics {
 
 TraceVerificationStatistics verifySgfTrace(const std::filesystem::path& sgf_path,
                                            const ProofManifest& manifest,
-                                           const ProofTable& table);
+                                           const ProofTable& table,
+                                           const RzProofTable* rzone_table = nullptr);
 
 } // namespace solver2048

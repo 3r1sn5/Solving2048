@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <stdexcept>
+#include <unordered_set>
 #include <utility>
 
 namespace solver2048 {
@@ -50,13 +51,22 @@ std::string SearchAction::summaryToken() const
 }
 
 Solver::Solver(const Game& game, SolverOptions options, ProgressCallback progress)
-    : game_(game), options_(options), progress_(std::move(progress))
+    : game_(game),
+      options_(options),
+      progress_(std::move(progress)),
+      rzone_table_(game,
+                   options.winning_tile,
+                   options.rzone_max_cells,
+                   options.rzone_lookup_policy)
 {
     if (options_.winning_tile < 2 || (options_.winning_tile & (options_.winning_tile - 1)) != 0) {
         throw std::invalid_argument("winning tile must be a power of two and at least 2");
     }
     if (options_.use_tt_symmetry && !options_.use_transposition_table) {
         throw std::invalid_argument("TT symmetry requires the transposition table to be enabled");
+    }
+    if (options_.rzone_shadow_exact_check && !options_.use_transposition_table) {
+        throw std::invalid_argument("RZone shadow exact check requires exact TT");
     }
 }
 
@@ -74,6 +84,7 @@ SearchResult Solver::solve()
 
     SearchResult result;
     result.outcome = solvePlayer(game_.fixedOpening(), *root);
+    statistics_.rzone = rzone_table_.statistics();
     result.statistics = statistics_;
     if (root->selected_action && root->selected_action->kind == SearchAction::Kind::Slide) {
         result.root_action = root->selected_action->direction;
@@ -82,6 +93,92 @@ SearchResult Solver::solve()
     result.root = std::move(root);
     solve_finished_ = true;
     return result;
+}
+
+void Solver::annotateRZone(TraceNode& trace, RZoneCertificateId id, bool hit)
+{
+    const RZoneCertificate* certificate = rzone_table_.find(id);
+    if (!certificate || !certificate->validated) {
+        throw std::logic_error("attempted to attach an invalid RZone certificate");
+    }
+    trace.rzone_hit = hit;
+    trace.rzone_certificate_id = id;
+    trace.rzone_kind = certificate->kind;
+    trace.rzone_mask = certificate->mask;
+    trace.rzone_masked_board = certificate->masked_board;
+    trace.rzone_depth = certificate->depth;
+}
+
+void Solver::createTerminalRZone(Board board, TraceNode& trace)
+{
+    if (options_.rzone_mode == RZoneMode::Disabled) return;
+    const std::optional<RZoneCertificateId> id = rzone_table_.createTerminal(board, trace.phase);
+    if (id) annotateRZone(trace, *id, false);
+}
+
+void Solver::validateRZoneAgainstExact(Board board, Phase phase) const
+{
+    if (!options_.rzone_shadow_exact_check) return;
+    const CanonicalBoard key = transpositionKey(board);
+    const auto& table = phase == Phase::Player ? player_tt_ : environment_tt_;
+    const auto found = table.find(key.board.raw);
+    if (found != table.end() && found->second.outcome != Outcome::Win) {
+        throw std::logic_error("RZone Win conflicts with exact TT outcome");
+    }
+}
+
+bool Solver::lookupRZone(Board board, Phase phase, TraceNode& trace)
+{
+    if (options_.rzone_mode != RZoneMode::Lookup) return false;
+    const std::optional<RZoneCertificateId> id = rzone_table_.lookup(board, phase);
+    if (!id) return false;
+    validateRZoneAgainstExact(board, phase);
+    trace.outcome = Outcome::Win;
+    trace.terminal_reason = TerminalReason::None;
+    trace.solved_by = SolvedBy::RZoneTable;
+    annotateRZone(trace, *id, true);
+    const RZoneCertificate* certificate = rzone_table_.find(*id);
+    if (phase == Phase::Player && certificate && certificate->slide) {
+        trace.selected_action = SearchAction::slide(*certificate->slide);
+    }
+    return true;
+}
+
+void Solver::liftPlayerRZone(
+    Board board, Direction direction, const TraceNode& child, TraceNode& trace)
+{
+    if (options_.rzone_mode == RZoneMode::Disabled || !child.rzone_certificate_id) return;
+    const std::optional<RZoneCertificateId> id =
+        rzone_table_.liftFixedSlide(board, direction, *child.rzone_certificate_id);
+    if (id) annotateRZone(trace, *id, false);
+}
+
+void Solver::liftEnvironmentRZone(Board board, TraceNode& trace)
+{
+    if (options_.rzone_mode == RZoneMode::Disabled) return;
+    std::optional<RZoneCertificateId> best_id;
+    unsigned best_cells = 17;
+    unsigned best_depth = 0;
+    std::unordered_set<RZoneCertificateId> attempted;
+    for (const auto& child : trace.children) {
+        if (!child->rzone_certificate_id) continue;
+        if (!attempted.insert(*child->rzone_certificate_id).second) continue;
+        const std::optional<RZoneCertificateId> id =
+            rzone_table_.liftUniversalPlacement(board, *child->rzone_certificate_id);
+        if (!id) continue;
+        const RZoneCertificate* candidate = rzone_table_.find(*id);
+        if (!candidate) continue;
+        const unsigned candidate_cells = RZoneTable::countCells(candidate->mask);
+        if (!best_id || candidate_cells < best_cells ||
+            (candidate_cells == best_cells && candidate->depth < best_depth) ||
+            (candidate_cells == best_cells && candidate->depth == best_depth &&
+             candidate->id < *best_id)) {
+            best_id = candidate->id;
+            best_cells = candidate_cells;
+            best_depth = candidate->depth;
+        }
+    }
+    if (best_id) annotateRZone(trace, *best_id, false);
 }
 
 void Solver::assignTraceId(TraceNode& trace)
@@ -231,6 +328,7 @@ void Solver::expandedNode()
 {
     if (progress_ && options_.progress_interval != 0 &&
         statistics_.combinedNodes() % options_.progress_interval == 0) {
+        statistics_.rzone = rzone_table_.statistics();
         progress_(statistics_);
     }
 }
@@ -243,8 +341,10 @@ Outcome Solver::solvePlayer(Board board, TraceNode& trace)
         trace.outcome = Outcome::Win;
         trace.terminal_reason = TerminalReason::WinningTile;
         trace.solved_by = SolvedBy::Terminal;
+        createTerminalRZone(board, trace);
         return trace.outcome;
     }
+    if (lookupRZone(board, Phase::Player, trace)) return trace.outcome;
     if (lookupPlayerTransposition(board, trace)) return trace.outcome;
     if (atNodeLimit()) {
         ++statistics_.node_limit_cutoffs;
@@ -300,6 +400,7 @@ Outcome Solver::solvePlayer(Board board, TraceNode& trace)
             child->outcome = Outcome::Win;
             child->terminal_reason = TerminalReason::WinningTile;
             child->solved_by = SolvedBy::Terminal;
+            createTerminalRZone(action.slide.afterstate, *child);
             child_outcome = Outcome::Win;
         } else {
             child_outcome = solveEnvironment(action.slide.afterstate, *child);
@@ -313,6 +414,7 @@ Outcome Solver::solvePlayer(Board board, TraceNode& trace)
             for (std::size_t skipped = index + 1; skipped < actions.size(); ++skipped) {
                 trace.skipped_actions.push_back(SearchAction::slide(actions[skipped].slide.direction));
             }
+            liftPlayerRZone(board, action.slide.direction, *trace.children.back(), trace);
             storePlayerTransposition(board, trace);
             return trace.outcome;
         }
@@ -332,8 +434,10 @@ Outcome Solver::solveEnvironment(Board afterstate, TraceNode& trace)
         trace.outcome = Outcome::Win;
         trace.terminal_reason = TerminalReason::WinningTile;
         trace.solved_by = SolvedBy::Terminal;
+        createTerminalRZone(afterstate, trace);
         return trace.outcome;
     }
+    if (lookupRZone(afterstate, Phase::Environment, trace)) return trace.outcome;
     if (lookupEnvironmentTransposition(afterstate, trace)) return trace.outcome;
     if (atNodeLimit()) {
         ++statistics_.node_limit_cutoffs;
@@ -379,6 +483,7 @@ Outcome Solver::solveEnvironment(Board afterstate, TraceNode& trace)
     }
 
     trace.outcome = has_unknown ? Outcome::Unknown : Outcome::Win;
+    if (trace.outcome == Outcome::Win) liftEnvironmentRZone(afterstate, trace);
     storeEnvironmentTransposition(afterstate, trace);
     return trace.outcome;
 }
@@ -415,6 +520,7 @@ const char* solvedByName(SolvedBy solved_by)
     switch (solved_by) {
         case SolvedBy::None: return "NONE";
         case SolvedBy::Terminal: return "TERMINAL";
+        case SolvedBy::RZoneTable: return "RZONE_TT";
         case SolvedBy::TranspositionTable: return "TT";
         case SolvedBy::Backpropagation: return "BACKPROPAGATION";
         case SolvedBy::NodeLimit: return "NODE_LIMIT";

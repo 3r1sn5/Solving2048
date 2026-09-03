@@ -15,6 +15,10 @@ struct SgfMetadata {
     std::uint64_t node_limit = 0;
     bool use_transposition_table = false;
     bool use_tt_symmetry = false;
+    RZoneMode rzone_mode = RZoneMode::Disabled;
+    RZoneLookupPolicy rzone_lookup_policy = RZoneLookupPolicy::FullScan;
+    unsigned rzone_max_cells = 16;
+    bool rzone_shadow_exact_check = false;
     bool load_tt = false;
     bool save_tt = false;
     std::filesystem::path tt_path;
@@ -23,6 +27,13 @@ struct SgfMetadata {
     std::optional<std::uint64_t> tt_file_size;
     std::optional<std::uint64_t> tt_player_records;
     std::optional<std::uint64_t> tt_environment_records;
+    bool load_rz = false;
+    bool save_rz = false;
+    std::filesystem::path rz_path;
+    std::optional<std::uint16_t> rz_format_version;
+    std::optional<std::uint32_t> rz_semantics_version;
+    std::optional<std::uint64_t> rz_prefix_record_count;
+    std::optional<std::uint64_t> rz_prefix_checksum;
     std::filesystem::path config_path;
     std::array<unsigned, 16> opening{};
     std::string network;
