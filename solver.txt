@@ -1,0 +1,892 @@
+2048 Solver 第一階段規格整理
+============================
+
+1. 第一階段目標
+---------------
+
+- 第一版只支援固定開局，不處理任意開局。
+- Winning tile 暫定為 8；目標是判斷 Player 是否能保證產生 8。
+- 固定開局以 row-major、位置 0 到 15 編號：
+
+    位置：  0  1  2  3
+           4  5  6  7
+           8  9 10 11
+          12 13 14 15
+
+    開局：  2  2  0  0
+           0  0  0  0
+           0  0  0  0
+           0  0  0  0
+
+- 固定開局完成後直接從 Player turn 開始，因此 root 是 Player node；開局前不再經過
+  Environment placement。
+
+- 保留純粹的 brute-force DFS baseline，用來建立正確性與效能比較基準；另提供 exact
+  transposition table 與 symmetry canonicalization。隨附的 solver.cfg 以可實際完成搜尋的
+  TT + symmetry 模式為預設；將兩者關閉即可執行原始 baseline。
+- 可設定 combined node limit；0 表示不限。隨附設定為 0，達到非零 limit 只能回傳
+  Unknown，不能當成 Loss。
+- 第一版必須接上現有的 N-tuple network，但 network 不得改變 Win/Loss 證明。
+
+
+2. 架構與程式碼邊界
+-------------------
+
+- 從原本的 2048.cpp 透過 2048_api.h 抽出可重用的遊戲與 read-only evaluator API。
+- Solver 應該是獨立模組，不把遊戲規則重新複製一份。
+- Solver 相關實作放在 ./solver/ 目錄內。
+- 共用 API 可以由 2048.cpp 提供 facade，讓原程式與 Solver 共用同一套：
+
+  - board/state 表示法
+  - 四個方向的滑動規則
+  - legal move 判斷
+  - move reward
+  - afterstate
+  - empty cells 列舉
+  - tile placement
+  - winning tile 判斷
+  - 現有 N-tuple afterstate evaluator
+
+- 原本的 2048 主程式與獨立 Solver 應可分別建置，不應互相綁死 main()。
+- N-tuple 對 Solver 應是 read-only value function：
+
+      V(afterstate) -> float
+
+
+3. 狀態與節點類型
+-----------------
+
+搜尋樹交替包含兩種 phase，兩者不能混用：
+
+Player node
+    輪到 Player 選擇滑動方向的盤面。
+
+Environment node
+    Player 已經完成滑動、但 Environment 尚未放置新 tile 的 afterstate。
+
+一個完整回合為：
+
+    Player board
+        -> Player 選擇一個 legal slide
+        -> afterstate / Environment node
+        -> Environment 選擇一個 placement
+        -> 下一個 Player board
+
+
+4. Win/Loss 的觀點
+------------------
+
+- 所有 Win/Loss 都從 Player 的觀點命名。
+- W(s) 表示「Player 從狀態 s 出發，能保證達到 winning tile」。
+- 盤面已經產生 winning tile 時，立即回傳 Player Win。
+- Player 沒有 legal action，而且尚未達到 winning tile 時，回傳 Player Loss。
+- 若 node limit 使證明無法完成，回傳 Unknown。
+
+第一版固定開局只需要處理「產生 tile 8」。若未來 API 接受任意盤面，應再明確決定
+盤面已含 16、但沒有 8 時，是用 tile >= 8 還是 tile == 8 判定；對目前固定開局的
+正常遊戲路徑，兩種定義不會產生差異，因為 16 不可能在未先產生 8 的情況下出現。
+
+
+5. AND-OR tree 語意
+-------------------
+
+Player 是 OR node：
+
+    W_player(board) = OR over all legal Player actions
+                      W_environment(afterstate(action))
+
+- 只要至少一個 Player action 是 Win，Player node 就是 Win。
+- 所有 legal Player actions 都是 Loss 時，Player node 才是 Loss。
+- 沒有 Win、但至少一個 child 是 Unknown 時，Player node 是 Unknown。
+
+Environment 是 AND node，這裡 AND 的命題是「Player 仍然能贏」：
+
+    W_environment(afterstate) = AND over all legal placements
+                                W_player(child(placement))
+
+- 所有 placement children 都是 Player Win，Environment node 才是 Player Win。
+- 只要存在一個 placement child 是 Player Loss，Environment 就能選擇該 placement，
+  因此 Environment node 對 Player 而言是 Loss。
+- 沒有 Loss、但至少一個 child 是 Unknown 時，Environment node 是 Unknown。
+
+這是 guaranteed / adversarial backup：Player 的策略必須抵抗 Environment 的每一種
+合法 placement，才能稱為 guaranteed Win。
+
+
+6. Environment action set
+-------------------------
+
+Environment 必須列舉完整 action set。若 afterstate 有 E 個 empty cells，必須建立：
+
+    E * 2 個 placement actions
+
+每個 empty position 都各有：
+
+    (position, tile 2)
+    (position, tile 4)
+
+例如 Player 向左滑動後有 14 個空格，該 Environment node 就有 28 個 children。
+
+- 不使用 90%/10% 機率。
+- 不抽樣 placement。
+- 不只挑最差或最好的一個位置。
+- 不把「放 2」和「放 4」合併。
+- child 集合必須完整建立；DFS 可以在 AND/OR 結果已確定後做邏輯短路。
+
+Environment children 不使用 value function 排序，依固定順序進行 DFS：
+
+    position 0 -> 15，每個 position 先 tile 2、再 tile 4
+
+位置順序採 row-major，也就是由左到右、由上到下。完整 action set 必須產生並納入
+AND node 語意；實際遞迴時若某個 child 已足以確定 Environment node 為 Loss，則可
+立即短路，不必繼續展開剩餘 children。
+
+
+7. 為何不是 Expectimax 或 existential backup
+-----------------------------------------------
+
+Expectimax
+    對 Environment children 依 spawn 機率取期望值，回答的是平均表現或期望分數，
+    不能證明 Player 對所有 placement 都一定能贏。
+
+Existential Environment backup
+    只要存在一個對 Player 有利的 placement 就算 Win，等於 Environment 會配合
+    Player，這也不是 guaranteed Win。
+
+目前選擇
+    使用 adversarial AND-OR tree。Player 選一個 action；Environment 可以從完整
+    placement action set 中選擇任何一個 action。
+
+
+8. N-tuple value function 的角色
+-------------------------------
+
+Win/Loss 必須由完整 AND-OR DFS 證明，不能直接由 N-tuple value 判定。
+
+每個 Player action 的比較值為：
+
+    Q(action) = move_reward(action) + V(afterstate)
+
+建議流程：
+
+1. 產生目前 Player node 的全部 legal actions。
+2. 計算每個 action 的 Q(action)。
+3. 依 Q 由高到低進行 DFS 證明。
+4. 若高 Q action 被證明為 Loss，就拒絕它並繼續下一個 action。
+5. 第一個被證明為 Win 的 action，就是 Q 最大的 proven-winning action。
+6. 如果沒有 Win、但至少一個 action 是 Unknown，回傳 Unknown；只有所有 actions
+   都是 Loss 時才回傳 Player Loss。
+
+因此：
+
+- 高 value 不能把 proven-losing action 變成 Win。
+- Value function 只負責 action ordering，以及多個 guaranteed-winning actions 之間的選擇。
+- Immediate Win 不一定要無條件優先；若另一個非 immediate action 也是 guaranteed Win，
+  可以由 Q(action) 比較兩者。
+- 第一版不另外最佳化勝率或最少步數。
+- Move reward 是目前 slide 合併 tiles 立即得到的分數。N-tuple 的 V(afterstate) 評估後續
+  return，不包含這次 slide 的 reward，因此兩者必須相加後才是完整 action evaluation。
+- 若 Q 相同，使用固定的 direction/opcode 順序作 deterministic tie-break，例如
+  up -> right -> down -> left。
+
+
+9. TT 關閉時的 brute-force DFS baseline 限制
+-------------------------------------------
+
+TT 關閉時禁止使用任何搜尋結果快取或跨狀態剪枝，包括：
+
+- Player transposition table / Player cache
+- Environment transposition table / Environment cache
+- memoization
+- visited-state set
+- symmetry canonicalization
+- duplicate-state elimination
+- cached Win/Loss result
+- 跨狀態 bound 或 heuristic cutoff
+
+同一個盤面即使經由不同歷史再次抵達，也必須重新展開。
+
+可以保留的項目：
+
+- AND/OR 結果已確定時的邏輯短路
+- N-tuple 對同一 Player node 內 actions 的排序
+- 2048.cpp 原有的單列滑動 lookup table；它只加速 move mechanics，不儲存搜尋結果，
+  因此不是 Solver transposition cache
+- 明確設定的 node limit；它是資源上限，cutoff 必須回傳 Unknown，不得偽裝成 Loss
+
+這個模式的目的不是速度，而是作為 cache、symmetry reduction 或其他最佳化的正確性
+與效能 baseline。可選的 exact TT 是另一個 execution mode，統計不可與 raw baseline
+直接混用。
+
+
+10. DFS 參考流程
+----------------
+
+以下是 TT 關閉時的 baseline 主流程；TT 開啟時會在 terminal 後、node-limit 前加入
+第 19 節所述的 exact lookup，完成 backup 後再依規則寫入。
+
+solve_player(board):
+    if board has winning tile:
+        return Win
+
+    if node_limit != 0 and combined expanded nodes reached node_limit:
+        return Unknown
+
+    player_nodes += 1
+    actions = all legal slides(board)
+    player_actions += actions.size
+
+    compute Q(action) for every action
+    sort actions by descending Q, then deterministic direction order
+
+    has_unknown = false
+    for action in actions:
+        if action.afterstate already has winning tile:
+            return Win(action, Q(action))
+
+        child = solve_environment(action.afterstate)
+        if child == Win:
+            return Win(action, Q(action))
+
+        if child == Unknown:
+            has_unknown = true
+
+    return Unknown if has_unknown else Loss
+
+
+solve_environment(afterstate):
+    if afterstate has winning tile:
+        return Win
+    if node_limit != 0 and combined expanded nodes reached node_limit:
+        return Unknown
+
+    environment_nodes += 1
+    placements = every empty position x { tile 2, tile 4 }, ordered by
+                 row-major position 0 -> 15 and then tile 2 -> tile 4
+    placement_actions += placements.size
+    assert placements is not empty for a legal-game afterstate
+
+    has_unknown = false
+    for placement in placements:
+        child = solve_player(placement.child)
+        if child == Loss:
+            return Loss
+
+        if child == Unknown:
+            has_unknown = true
+
+    return Unknown if has_unknown else Win
+
+
+11. Baseline 統計定義
+--------------------
+
+player nodes
+    通過 winning-tile 與 node-limit 入口檢查、並實際產生 legal actions 的 Player nodes
+    次數；沒有 legal action 的 Loss leaf 也包含在內。同一盤面重複抵達會重複計數。
+
+environment nodes
+    通過 winning-tile 與 node-limit 入口檢查、並實際產生 placements 的 Environment
+    nodes 次數。同一 afterstate 重複抵達會重複計數。
+
+player actions
+    所有已展開 Player nodes 所產生的 legal slide actions 總數。
+
+placement actions
+    所有已展開 Environment nodes 所完整產生的 placement actions 總數。
+
+node-limit cutoffs
+    因 combined node limit 而無法展開、並回傳 Unknown 的節點呼叫次數。
+
+TT 關閉的 baseline 不應出現非零：
+
+    player cache hits
+    environment cache hits
+
+因為 baseline 不使用搜尋 cache。其 nodes/actions 是 raw DFS work，不能和 TT 開啟後
+的 DAG 統計直接比較。TT 開啟時另外輸出 player/environment TT hits 與 exact entries；
+TT hit 不計入 expanded nodes/actions。
+
+
+12. Solver 輸出
+---------------
+
+至少輸出：
+
+- fixed opening
+- winning tile（第一版為 8）
+- 使用的 N-tuple network/model
+- root result：WIN、LOSS 或 UNKNOWN
+- WIN 時選擇的 root action
+- 該 action 的 Q = move reward + V(afterstate)
+- player nodes
+- environment nodes
+- player actions
+- placement actions
+- transposition table enabled/disabled
+- TT 開啟時的 Player/Environment hits 與 entries
+- SGF output path
+
+TT 關閉時不輸出 cache-hit 統計。
+
+
+13. 必要測試
+-------------
+
+遊戲/API：
+
+- 固定開局確實是 position 0、1 各一個 tile 2。
+- 固定開局的 legal moves 與 afterstates 正確。
+- Environment 對 E 個空格產生剛好 2E 個 placement children。
+- 每個空格都有 tile 2 與 tile 4，且沒有漏掉或覆寫既有 tile。
+
+AND-OR 語意：
+
+- Player node 只要一個 child Win 就是 Win。
+- Player node 全部 children Loss 才是 Loss。
+- Environment node 全部 placement children Win 才是 Player Win。
+- Environment node 只要一個 placement child Loss 就是 Player Loss。
+- winning tile terminal 判斷正確。
+
+Value function：
+
+- 多個 proven-winning actions 時選擇 Q 最大者。
+- 較高 Q 的 proven-losing action 必須被拒絕。
+- 非 immediate 但 guaranteed-winning 的 action，可以靠較高 Q 勝過 immediate Win。
+
+無快取 baseline：
+
+- 相同 Player state 搜尋兩次時必須重新展開。
+- 相同 Environment afterstate 搜尋兩次時必須重新展開。
+- TT hits/stores 必須維持 0，且 baseline CLI 不輸出 cache-hit 統計。
+
+Exact TT：
+
+- 同一 Player board 第二次抵達時命中 Player TT，不重新展開。
+- 同一 Environment afterstate 第二次抵達時命中 Environment TT，不重新展開。
+- Player 與 Environment 即使 raw board 相同也不可互相命中。
+- TT 關閉時原 baseline 的 ordering、nodes/actions 與 SGF 語意不變。
+- node-limit Unknown 不得寫入 TT；之後再次抵達仍必須重新搜尋。
+- budget 已滿時，既有 exact TT hit 仍可直接使用且不增加 cutoff。
+- TT hit 的 outcome、witness 與 reference node id 必須正確。
+- 開啟 symmetry canonicalization 時，同一盤面的八種 D4 對稱版本必須產生相同
+  canonical key。
+- 對稱盤面的第二次抵達必須命中既有 TT entry，而不是建立八筆重複 entry。
+- symmetry TT hit 的 slide direction 與 placement position 必須正確映射回目前盤面。
+- 旋轉或鏡射後的 Player/Environment exact outcome 必須與未使用 symmetry 的結果相同。
+- self-symmetric board 若有多個 transform 得到相同 minimum，必須以固定 transform id
+  tie-break，確保結果可重現。
+
+Node limit：
+
+- Player nodes + Environment nodes 不得超過設定值。
+- limit 為 0 時維持 unlimited baseline。
+- budget 不足時回傳 Unknown，不能回傳 Loss。
+- Player OR 與 Environment AND 必須正確傳播 Unknown。
+
+N-tuple integration：
+
+- 能載入既有 network/model。
+- 固定 afterstates 的 evaluator 數值與原 2048.cpp 一致。
+- 用小型、有界的 proof tree 驗證 Solver 確實呼叫 N-tuple evaluator。
+
+SGF 與 viewer：
+
+- 固定開局必須輸出為 W[4]、W[5]，replay 後與 Solver root board 相同。
+- 四個 slide 與所有 32 個 placement action id 都能正確 encode/decode。
+- SGF variation 順序與實際 DFS child 順序相同。
+- SGF 中的 Win、Loss、Unknown 與 Solver 結果相同。
+- short-circuit 後未展開的 actions 顯示為 Skipped，不能顯示成 Unknown。
+- Viewer 沿任意 SGF action path 重建的 board 必須與 Solver 節點 board 相同。
+- C[...] 中的特殊字元必須正確 SGF escape，輸出可被 viewer 重新解析。
+
+完整固定開局的無快取搜尋可能非常大，不適合放進每次執行的快速 unit tests；應作為
+獨立、opt-in 的 slow baseline benchmark。TT 關閉的 baseline 測試仍不得暗中使用
+cache；完整 target-8 TT solve 則是另一個可快速執行的 integration test。
+
+
+14. SGF search-tree 輸出
+------------------------
+
+Solver 搜尋結束時必須輸出 SGF，使搜尋過程可以重現並交由 viewer 顯示。格式參考
+../game-solver 的 adversarial 2048 tree log；SGF 使用 action path 重建盤面，不在每個
+節點重複儲存完整 board。
+
+SGF header 與固定開局：
+
+    (;FF[4]CA[UTF-8]SZ[4]
+    ;W[4]
+    ;W[5]C[... root information ...]
+    ...
+    )
+
+其中固定開局的 action 是 position 0、1 各放置 tile 2。第二個 opening placement
+完成後的節點就是 DFS root，該盤面輪到 Player。
+
+Action encoding 沿用 game-solver：
+
+    B[0] = up
+    B[1] = right
+    B[2] = down
+    B[3] = left
+
+    W[4 + position]  = placement tile 2
+    W[20 + position] = placement tile 4
+
+B 代表 Player slide，W 代表 Environment placement。Environment 的 DFS 順序仍是
+position 0 -> 15、每個 position 先 tile 2 再 tile 4，因此對應的 action id 順序是：
+
+    4, 20, 5, 21, 6, 22, ...
+
+SGF variation 的出現順序就是實際 DFS child 順序。Viewer 必須保留這個順序，不可
+預設依 value、subtree size 或 action id 重新排序。
+
+每個實際抵達的 search trace node（包含 terminal、Unknown 與 TT reference leaf）
+至少在 C[...] comment 中記錄：
+
+    solver_status: WIN | LOSS | UNKNOWN
+    solved_by = TERMINAL | TT | BACKPROPAGATION | NODE_LIMIT
+    node_id = 此次 trace node 的穩定 id
+    dfs_visit_order = 全域 DFS discovery/entry 順序（目前與 node_id 相同）
+    node_type = PLAYER | ENVIRONMENT
+    dfs_order = parent 之下的 sibling search order
+    children_total = 完整 legal action 數
+    children_visited = 實際呼叫或產生 terminal child 的數量
+    children_expanded = children 中通過 terminal/node-limit 檢查並消耗 node budget 的數量
+    children_skipped = 因 AND/OR 短路而未展開數
+    children_skipped_actions = 未展開 action 的名稱與 id
+    terminal_reason = WINNING_TILE | NO_LEGAL_MOVE | NODE_LIMIT | NONE
+
+TT reference leaf 另外記錄：
+
+    tt_hit = true
+    tt_source_node_id = 首次完整證明該 state 的 node id
+    terminal_reason = TRANSPOSITION_TABLE
+
+由 Player action 產生的 Environment node 另外記錄：
+
+    reward = 該次 slide 的 immediate merge reward
+    afterstate_value = V(afterstate)
+    action_value = reward + V(afterstate)
+
+所有 solver_status 仍固定採 Player 視角，不因 SGF 使用 B/W 而改變。必須區分：
+
+Unknown
+    該節點實際被搜尋，但因 node limit 無法完成證明。
+
+Skipped
+    該 action 合法，但 parent 已經透過 AND/OR short-circuit 得到確定結果，因此沒有
+    遞迴展開。Skipped 不是 Unknown，也不計入 expanded node counters。
+
+TT hit
+    該 action 已實際抵達一個先前完整證明的相同 `(board, phase)`，直接使用 exact
+    Win/Loss。它是 visited reference leaf，不是 Unknown、Skipped 或遊戲 terminal。
+
+solved_by 只記錄粗粒度的結果來源：
+
+TERMINAL
+    盤面已有 winning tile，或 Player 已沒有 legal move。
+
+TT
+    該 node 本身 lookup exact TT 成功，沒有重新展開。
+
+BACKPROPAGATION
+    該 node 正常展開 children，再透過 Player OR／Environment AND backup 得到
+    Win、Loss 或 propagated Unknown。即使 decisive child 是 TT hit，parent 仍屬於
+    BACKPROPAGATION。
+
+NODE_LIMIT
+    該 node 本身因 node limit 無法展開，因此回傳 Unknown。
+
+為了完整重現 action set，已展開 children 寫成真正的 SGF variations；short-circuit
+後未展開的 actions 可沿用 game-solver 的 children_skipped_actions 摘要，由 viewer
+建立 Skipped stubs，不需要為每個 Skipped action 寫入完整 subtree。
+
+SGF 輸出路徑必須可設定。產生 SGF 的 bookkeeping 不得改變 DFS action ordering、
+node-limit 語意或 baseline counters。搜尋未正常結束時不可把不完整內容偽裝成有效的
+最終 SGF；若實作使用暫存檔，只有 solve 正常返回後才發布正式檔案。
+
+
+15. 第一版 SGF viewer
+---------------------
+
+Viewer 放在 ./solver/viewer/，第一版採不依賴外部套件的本機靜態網頁，例如：
+
+    solver/viewer/index.html
+    solver/viewer/viewer.js
+    solver/viewer/viewer.css
+
+第一版 viewer 至少支援：
+
+- 從本機選擇並載入 SGF 檔案。
+- 依 opening prefix 與目前 action path 重建、顯示 4x4 board。
+- 顯示目前節點是 Player 或 Environment phase。
+- 分別顯示 Win、Loss、Unknown 與 Skipped。
+- 顯示 incoming action、reward、V(afterstate)、reward + V(afterstate)、DFS depth、child
+  統計與 terminal reason。
+- 在 inspector 顯示每個 node 的 `solved_by`，以區分 terminal、TT、正常 backup
+  與 node-limit cutoff。
+- Graph node 直接顯示全域 DFS visit order，並在 inspector 區分 global visit order
+  與 sibling order。
+- 展開或收合 children。
+- 提供「展開全部」按鈕，一次顯示目前 SGF 所保留的完整 proof tree；Skipped
+  stubs 是否納入顯示依「顯示 Skipped」開關決定。
+- 全樹展開與 SVG 繪製採分批處理並顯示進度；超過 50000 個 visible nodes 時
+  先顯示記憶體／時間警告，但使用者仍可選擇繼續。
+- 導航到 parent、child、previous sibling 與 next sibling。
+- 保留 SGF 中記錄的原始 DFS child 順序。
+- 可選擇顯示或隱藏由 children_skipped_actions 建立的 Skipped stubs。
+- 預設只展開目前路徑或使用者選擇的局部 subtree，避免一次建立整棵 DOM tree。
+
+第一版暫時忽略 multi-GB tree 的 scalable viewer，不實作：
+
+- SQLite SGF index
+- 本機 HTTP/index server
+- 預先計算的 full-tree graph layout
+- 依 viewport 查詢大型 tree
+
+
+16. 第一版不處理的項目
+-----------------------
+
+- 任意或隨機開局
+- Expectimax 與 90%/10% spawn probability
+- 勝率估計
+- 最少步數的獨立最佳化目標
+- TT 以外的 symmetry reduction
+- parallel search
+- approximate cutoff
+- 以 N-tuple value 直接取代 Win/Loss proof
+- multi-GB SGF indexed viewer
+
+
+17. 後續實作前仍可明確化的細節
+--------------------------------
+
+- 完整 slow benchmark 是否需要 progress、elapsed time 或外部 timeout。
+
+
+18. 第一版實作設定位置
+----------------------
+
+- 所有 runtime 設定與固定開局放在 ./solver/solver.cfg：
+
+      opening = 2@0, 2@1
+      winning tile = 8
+      combined node limit = 0
+      transposition table = true
+      TT symmetry = true
+      persistent TT load = true
+      persistent TT save = true
+      persistent TT path = solver/tt/target16.tt
+      network = 4x6patt
+      model = models/4x6patt.w
+      SGF output = solver/tree.sgf
+
+- 不帶參數執行 solver 時，自動讀取 solver/solver.cfg；--config PATH 可選擇另一份 cfg。
+- cfg 採嚴格 key=value 格式，支援空白行、# 註解與 inline comment；unknown、duplicate、
+  missing 或型別錯誤的 key 必須中止並回報檔案行號。
+- cfg 載入後仍可由 Solver CLI 覆寫 winning tile、node limit、TT、model 與 SGF path；TT 使用
+  --tt / --no-tt，symmetry canonicalization 使用 --tt-symmetry / --no-tt-symmetry，
+  persistent snapshot 使用 --load-tt / --no-load-tt、--save-tt / --no-save-tt 與
+  --tt-file PATH，precedence 為 cfg -> CLI。--no-tt 會一併關閉 persistent load/save。固定
+  開局由 cfg 的 opening=tile@position,... 設定，第一版
+  要求恰好兩個 tile，且 tile 只能是 2 或 4。
+- winning predicate 採 tile >= configured winning tile。
+- Environment node 若遇到沒有 empty cell 的非正常 afterstate，視為遊戲 API／Solver
+  invariant error；正常 legal slide 不應產生這種 afterstate。
+
+
+19. Optional exact transposition table
+--------------------------------------
+
+TT 可由 cfg/CLI 關閉。開啟後使用兩張 phase-separated table：
+
+    Player TT:      raw Player board       -> exact entry
+    Environment TT: raw afterstate         -> exact entry
+
+兩個 phase 必須分開，因為相同 raw board 在 Player OR 與 Environment AND 的命題不同。
+Winning tile 與規則不放入 key，因為每個 Solver/solve 都只服務一組 options，而且 solve
+若沒有載入 persistent snapshot，新的 Solver instance 從兩張空 table 開始；若有載入，
+則在 DFS 前發布已通過格式、checksum 與規則相容性檢查的 exact entries。第 20 節描述
+rotation/reflection canonicalization，第 21 節描述 persistent TT file。
+
+每個 entry 保存：
+
+    exact outcome = Win 或 Loss
+    source trace node id
+    logical children_total
+    decisive witness（若存在）
+    Player Win 的 selected action value = reward + V(afterstate)（若存在）
+
+查詢順序：
+
+1. 檢查 winning-tile terminal。
+2. 查詢對應 phase 的 TT。
+3. TT miss 才檢查 combined node limit。
+4. budget 允許時才計 expanded node 並產生 actions。
+
+因此已知 exact result 即使 budget 已滿仍可使用；TT hit 不消耗 node budget，也不增加
+node-limit cutoff。
+
+寫入規則：
+
+- Player 找到任一 Win child：存 exact Win。
+- Player 所有 children 都是 Loss：存 exact Loss。
+- Environment 找到任一 Loss child：存 exact Loss。
+- Environment 所有 children 都是 Win：存 exact Win。
+- 只要最後結果是 Unknown：不寫入 TT。
+
+Player Win 的 action 與 Environment Loss 的 placement 是 existential witness；Player Loss
+與 Environment Win 則是 universal proof，沒有單一 decisive witness。TT entry 只在該
+state 完成 exact backup 後 postorder 寫入，因此目前 tile sum 單調增加的 graph 不需要
+in-progress/cycle entry。
+
+TT 開啟後，Player/Environment nodes 只計 TT miss 且真正展開的 states；hits
+另行計數。在 unlimited 搜尋中，完成 backup 的 exact state 只會展開一次；有 node
+limit 時，Unknown 不會寫入，所以相同的未證明 state 仍可能重複展開。SGF 保留每次
+重複抵達的 action node，但將 exact hit 寫成指向首次 proof node 的 TT reference
+leaf，不複製整個 subtree。
+
+
+20. TT symmetry canonicalization 實作計畫
+-----------------------------------------
+
+目標是在保留第 19 節 exact TT 正確性的前提下，讓旋轉或鏡射後的等價盤面共用同一筆
+entry。使用正方形的完整 D4 對稱集合，共八種版本：四種旋轉，以及四種鏡射後旋轉。
+不採「每次 store 寫入八筆」的設計，以免同一個 symmetry orbit 最多占用八倍記憶體。
+
+Canonical key 定義：
+
+    S(board) = board 的八種 D4 對稱版本
+    canonical(board) = min(raw(x) for x in S(board))
+
+若 board' 是 board 的任一 D4 對稱版本，D4 的封閉性可保證：
+
+    S(board') = S(board)
+    canonical(board') = canonical(board)
+
+因此 store 與 lookup 都先 canonicalize，再對唯一 key 操作：
+
+    store(board):
+        canonical = canonicalize(board)
+        TT[canonical.raw] = exact entry
+
+    lookup(board):
+        canonical = canonicalize(board)
+        TT.find(canonical.raw)
+
+每次 canonicalization 需要產生或走訪八種對稱並比較 raw value，但只執行一次 hash-table
+lookup。若 lookup 對八個版本分別呼叫 TT.find()，其中只有 canonical minimum 可能存在，
+另外七次查詢沒有用途。
+
+現有共用 board 已提供：
+
+    board::isom64(i)    產生指定的 D4 對稱版本，i = 0..7
+    board::isomin64()   將 board 改成八種版本中 raw value 最小者
+
+原 2048.cpp 的 cache 已使用 isomin64() 後只查一次 cache。Solver 不直接 include board.h；
+應由 2048_api.h facade 暴露 canonicalization，避免在 ./solver/ 重新複製 board transformation
+規則。單純的 isomin64() 只提供最小盤面，沒有提供哪一個 transform 得到 minimum，因此
+新的 facade 結果還必須帶 transform id，例如：
+
+    struct CanonicalBoard {
+        RawBoard raw;
+        unsigned transform;  // original board -> canonical board
+    };
+
+    CanonicalBoard canonicalize(RawBoard board);
+
+實作以原始 board 為基準列舉 i = 0..7；比較 raw 後保存最小值與對應 transform id。
+若多個 transforms 產生相同 minimum，固定選 transform id 最小者，確保 deterministic。
+
+TT key 與 phase：
+
+    Player TT:      canonical(Player board) -> exact Player entry
+    Environment TT: canonical(afterstate)   -> exact Environment entry
+
+兩張 table 仍然分開；不能因 canonical raw 相同就讓 Player OR node 命中 Environment AND
+node。Winning-tile terminal 仍在 TT lookup 前檢查；Unknown 仍不得寫入；TT hit 仍不增加
+expanded node/action counters。
+
+Outcome、children_total 等不依賴盤面方向的欄位可直接共用，但 decisive witness 具有方向：
+
+- Player selected slide 需要轉換 up/right/down/left。
+- Environment selected placement 需要轉換 position 0..15；tile 2/4 本身不變。
+
+因此 TT entry 中的 selected_action 統一保存成 canonical orientation：
+
+    store source board:
+        source_to_canonical = canonicalize(source board).transform
+        canonical_action = transform(source_action, source_to_canonical)
+        store canonical_action
+
+    lookup current board:
+        current_to_canonical = canonicalize(current board).transform
+        current_action = transform(canonical_action,
+                                   inverse(current_to_canonical))
+
+2048_api facade 應同時提供或支援測試下列轉換：
+
+    transform board
+    transform position 0..15
+    transform slide direction/opcode
+    inverse transform
+
+所有 action mapping 必須以 row-major position 定義驗證，不能只靠方向名稱猜測。對每個
+transform，應驗證 transform 後執行 mapped slide，等於先執行原 slide 再 transform
+afterstate；placement 也應滿足相同的交換關係。
+
+selected_action_value 是目前 orientation 下 mapped Player witness 的
+`move reward + V(afterstate)`。為避免 SGF 記錄來源方向的舊值，symmetry hit 映射 selected
+action 後應以目前盤面重新執行 slide，取得 reward 與 afterstate，再計算完整 action value。
+Exact Win/Loss proof 本身不依賴 action value；它仍只用於 action ordering 與顯示。另以測試
+確認 slide reward 在 D4 transform 下保持相同，且目前 4x6patt evaluator 對八種對稱的值
+一致或在浮點容許誤差內一致。
+
+SGF 的 tt_source_node_id 可能指向不同 orientation 的來源盤面，這是合法的 symmetry hit，
+不能再假設 hit node 與 source node 的 raw board 完全相同。TT reference comment 增加：
+
+    tt_symmetry_hit = true | false
+    tt_transform = current board -> canonical board 的 transform id/name
+
+Viewer 顯示來源 reference 時應標示 transform；沿目前 action path 重建的 hit board 仍必須
+維持目前 orientation，不能為了顯示 TT source 而改寫 search trace board。
+
+為保留基礎 TT 作為後續 mechanism benchmark，設定分成兩層：
+
+    --tt / --no-tt
+        控制是否使用第 19 節的 exact TT。
+
+    --tt-symmetry / --no-tt-symmetry
+        TT 開啟時，控制 key 是否使用第 20 節 canonicalization。
+
+隨附 solver.cfg 啟用 symmetry；需要 exact-TT mechanism baseline 時，以另一份 cfg 關閉
+use_tt_symmetry，或使用 --no-tt-symmetry 覆寫。指定 symmetry 但沒有啟用 TT 時應回報設定
+錯誤，不可默默啟用或忽略。
+
+新增統計至少包含：
+
+    exact-orientation TT hits
+    symmetry-derived TT hits（目前 raw != canonical raw，或 source orientation 不同）
+    Player/Environment TT entries
+
+效能比較以相同 opening、winning tile、model 與 node limit 分別執行：
+
+    TT off brute-force
+    exact TT on, symmetry off
+    exact TT on, symmetry on
+
+主要比較 expanded Player/Environment nodes、actions、elapsed time、TT entries、TT hits 與
+peak memory。Canonicalization 每次會增加數個便宜的 bitboard transform/min comparisons，
+但應透過減少重複 entries 與 subtree expansion 補回成本。初版可在 lookup/store 各算一次；
+確認正確後，可讓 lookup miss 保存 canonical raw 與 transform 並傳給 store，避免同一 node
+重算兩次。
+
+
+21. Persistent TT file 第一版
+-----------------------------
+
+完整格式與驗證規格見專案根目錄的 TT_file.txt。第一版已實作於：
+
+    solver/tt_file.h
+    solver/tt_file.cpp
+
+目的不是保存某次 DFS tree，而是把同一 winning tile、遊戲規則與 symmetry mode 下已完成
+證明的 exact `(board, phase)` states 跨 process、跨固定 opening 重複使用。
+
+檔案格式：
+
+    128-byte little-endian versioned header
+    Player section
+    Environment section
+    每筆 fixed 16-byte record
+    CRC64-ECMA payload checksum
+
+Header 記錄 magic、format/rules/board-encoding version、winning tile、symmetry mode、兩區的
+offset/count、payload size、checksum algorithm 與 checksum。檔案不綁 opening、model、
+value function 或 node limit。
+
+Record 只保存：
+
+    uint64 canonical/raw board key
+    exact Win/Loss outcome
+    existential witness action 或 NONE
+    children_total
+    zeroed flags/reserved
+
+Unknown、source_trace_id、selected_action_value、DFS order 與統計不得落盤。Player Win 與
+Environment Loss 必須有 witness；Player Loss 與 Environment Win 不得有 witness。Symmetry
+mode 的 witness 固定以 canonical orientation 保存。
+
+寫入不是每次 TT store 都碰磁碟。搜尋期間仍使用 in-memory unordered_map；solve 完成後才
+遍歷兩張 table，逐筆 encode 到 `<tt_path>.tmp`，計算 checksum、回填 header、flush/close，
+最後 atomic rename 發布正式檔案。Records 第一版不排序，因此相同 logical table 的 bytewise
+checksum 可能因 unordered_map iteration order 不同而改變。
+
+載入時先讀進 temporary maps，完整檢查成功後才發布給 Solver。必須拒絕：
+
+- magic/version/endianness/rules/board encoding 不相容。
+- winning tile 或 symmetry mode 不相容。
+- section offset/count/file size 不一致。
+- checksum mismatch 或 truncated/trailing data。
+- Unknown/非法 outcome、witness、children_total、flags/reserved。
+- symmetry mode 下的 non-canonical key。
+- duplicate 或 conflicting key。
+
+`load_tt=true` 而檔案不存在時，明確輸出訊息並從空 table 開始，方便第一次建立 snapshot；
+已存在但無法讀取或不相容時必須停止。載入 entries 與本次新證明 entries 在記憶體中自然
+合併；相同 key 會在 DFS lookup 時直接使用，Unknown 仍不儲存。
+CLI 覆寫 winning tile 或 symmetry mode 時必須同時指定相容的 `--tt-file`，或用
+`--no-load-tt --no-save-tt` 避免讀寫原本規則的 snapshot。
+
+Persistent hit 仍計入一般 TT hits，但另外計入 Player/Environment persistent hit counters。
+SGF leaf 不引用前一個 process 的 trace ID，而是記錄：
+
+    tt_source = persistent
+    tt_phase = PLAYER | ENVIRONMENT
+    tt_key = canonical key
+    tt_transform = current -> canonical
+
+Trace-local hit 則使用 `tt_source=trace` 與 `tt_source_node_id`。Viewer 對兩者分別顯示。
+
+第一版限制：
+
+- 一個 Solver instance 只執行一次 solve。
+- 不支援多 process 同時寫同一個 TT file。
+- 不支援 checkpoint、compression、sorted/mmap storage。
+- TT reader 本身只驗證格式與 entry invariant；proof correctness 由下一節的獨立 checker 驗證。
+
+
+22. Proof Checker 第一版
+------------------------
+
+完整規格與實作進度見專案根目錄的 Proof_Checker.txt。第一版 executable 為：
+
+    solver/proof_checker
+
+執行方式：
+
+    solver/proof_checker --sgf result/8/8_ttfile.sgf \
+                         --tt result/8/8_ttfile.tt
+
+Checker 重新開啟 SGF 與 TT file，不呼叫 Solver DFS 或 N-tuple evaluator。它從 SGF 取得
+兩個 opening placements、Player root outcome、winning tile 與 symmetry mode，然後用獨立
+TT binary reader 驗證 header、records 與 CRC64。接著以串流方式重播完整 SGF DFS trace，
+不另建整棵 tree，最後再依 2048 規則驗證完整 root logical proof DAG。
+
+Player Win 與 Environment Loss 只追蹤合法 witness child；Player Loss 與 Environment Win
+自行列舉並驗證所有合法 children。Terminal、children_total、D4 witness inverse transform、
+missing entry、outcome mismatch、cycle 與 memoized transposition 都由 checker 處理。
+
+完整 trace audit 另外驗證每條 slide/placement 合法且產生正確 board、slide reward、phase
+alternation、node id/DFS preorder、terminal、children counts、AND/OR back propagation、
+short-circuit/skipped action partition，以及每個 TT leaf 的 canonical key、phase、outcome、
+children_total 與 witness。Player action value 排序需要 N-tuple network，不屬於 proof checker
+的信任範圍；Environment generator order 則會核對。
+
+新版 SGF 另外保存 TT format version、payload checksum、file size 與兩個 section counts，
+把 SGF 綁定至實際 TT snapshot。Legacy SGF 缺少這些欄位時仍可驗證 logical proof，但輸出
+`Artifact binding: UNAVAILABLE`。
+
+尚未提供 full-TT audit、Solver 結束後自動執行 checker 或 verified proof SGF export。

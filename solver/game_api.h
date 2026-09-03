@@ -72,6 +72,12 @@ private:
     Board opening_;
 };
 
+Board boardFromTiles(const std::array<unsigned, 16>& tiles);
+bool boardHasWinningTile(Board board, unsigned winning_tile);
+std::vector<SlideResult> generateLegalSlides(Board board);
+std::vector<PlacementResult> generateLegalPlacements(Board afterstate);
+std::array<unsigned, 16> boardTileValues(Board board);
+
 const char* directionName(Direction direction);
 int directionOpcode(Direction direction);
 Board transformBoard(Board board, std::uint8_t transform);

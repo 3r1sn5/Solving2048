@@ -10,8 +10,10 @@ SOURCE ?= 2048.cpp
 OUTPUT ?= $(basename $(word 1, $(SOURCE)))
 SOLVER_OUTPUT ?= solver/solver2048
 SOLVER_TEST_OUTPUT ?= solver/solver_tests
+PROOF_CHECKER_OUTPUT ?= solver/proof_checker
 SOLVER_SOURCES := solver/main.cpp solver/config.cpp solver/game_api.cpp solver/search.cpp solver/sgf.cpp solver/tt_file.cpp 2048.cpp
-SOLVER_TEST_SOURCES := solver/tests.cpp solver/config.cpp solver/game_api.cpp solver/search.cpp solver/sgf.cpp solver/tt_file.cpp 2048.cpp
+SOLVER_TEST_SOURCES := solver/tests.cpp solver/config.cpp solver/game_api.cpp solver/search.cpp solver/sgf.cpp solver/tt_file.cpp solver/proof_checker.cpp 2048.cpp
+PROOF_CHECKER_SOURCES := solver/proof_checker_main.cpp solver/proof_checker.cpp solver/game_api.cpp 2048.cpp
 # other make options
 TARGET ?= default
 SCRIPT ?= make-profile.sh
@@ -63,6 +65,10 @@ solver-test: # build and run the solver tests
 		-DMOPORGIC_NO_MAIN -Wno-unused-parameter -Wno-deprecated-copy -I. -o $(SOLVER_TEST_OUTPUT) $(SOLVER_TEST_SOURCES)
 	./$(SOLVER_TEST_OUTPUT)
 
+proof-checker: # build the persistent-TT logical proof checker
+	$(CXX) -std=$(STD) -O$(OLEVEL) $(addprefix -m, $(ARCH) $(INSTS)) -pthread $(FLAGS) \
+		-DMOPORGIC_NO_MAIN -Wno-unused-parameter -Wno-deprecated-copy -I. -o $(PROOF_CHECKER_OUTPUT) $(PROOF_CHECKER_SOURCES)
+
 static: # build with static executable
 	@+$(MAKE) default ARCH="tune=generic" FLAGS="$(FLAGS) -static"
 
@@ -92,6 +98,6 @@ clean: # cleanup
 	$(if $(FILES), $(RM) $(FILES))
 
 solver-clean:
-	$(RM) $(SOLVER_OUTPUT) $(SOLVER_TEST_OUTPUT)
+	$(RM) $(SOLVER_OUTPUT) $(SOLVER_TEST_OUTPUT) $(PROOF_CHECKER_OUTPUT)
 
-.PHONY: solver solver-test solver-clean
+.PHONY: solver solver-test proof-checker solver-clean

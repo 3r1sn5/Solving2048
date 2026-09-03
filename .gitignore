@@ -19,6 +19,7 @@
 2048.gcda
 /solver/solver2048
 /solver/solver_tests
+/solver/proof_checker
 /solver/*.sgf
 /solver/*.sgf.tmp
 

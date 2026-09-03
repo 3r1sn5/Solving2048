@@ -162,6 +162,22 @@ reference leaf rather than duplicating its proven subtree. A trace-local hit
 uses `tt_source_node_id`; a persistent hit uses `tt_source=persistent`,
 `tt_phase`, and `tt_key`, because a previous process's trace ID is not valid.
 
+## Proof checker
+
+Build and run the independent SGF + TT verifier with:
+
+```bash
+make proof-checker
+solver/proof_checker --sgf result/opening.sgf --tt result/target.tt
+```
+
+The checker reloads both artifacts, validates the TT format and SGF-to-TT
+checksum binding, replays the complete retained SGF trace, and independently
+verifies the root AND/OR proof DAG. At a TT leaf it follows the entry's witness
+or complete child set according to the node phase and outcome until it reaches
+game-rule terminals. It does not load the N-tuple evaluator or call the
+solver's DFS. See `../Proof_Checker.txt` for the verification contract.
+
 ## Viewer
 
 Open `solver/viewer/index.html` in a browser and choose the generated SGF file.

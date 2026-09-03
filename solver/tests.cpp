@@ -1,5 +1,6 @@
 #include "config.h"
 #include "game_api.h"
+#include "proof_checker.h"
 #include "search.h"
 #include "sgf.h"
 #include "tt_file.h"
@@ -31,6 +32,9 @@ using solver2048::GameApi;
 using solver2048::Outcome;
 using solver2048::Phase;
 using solver2048::PlacementResult;
+using solver2048::ProofManifest;
+using solver2048::ProofTable;
+using solver2048::ProofVerificationResult;
 using solver2048::SearchAction;
 using solver2048::SearchResult;
 using solver2048::SolverConfig;
@@ -1023,6 +1027,8 @@ void testPersistentTtRejectsIncompatibleAndCorruptFiles()
     const TtFileSummary recovered = TtFile::load(temporary.path, invalid_witness);
     check(recovered.entries() == 1,
           "failed TT load must not partially publish entries into the Solver");
+    check(ProofTable::load(temporary.path).summary().entries() == 1,
+          "proof checker TT reader must accept a valid snapshot");
 
     const std::uint8_t original_key_byte = readByte(temporary.path, first_record);
     writeByte(temporary.path, first_record, original_key_byte ^ 0x80u);
@@ -1030,6 +1036,8 @@ void testPersistentTtRejectsIncompatibleAndCorruptFiles()
     Solver checksum_solver(checksum_game, options);
     checkThrows([&] { (void)TtFile::load(temporary.path, checksum_solver); },
                 "persistent TT payload checksum corruption must be rejected");
+    checkThrows([&] { (void)ProofTable::load(temporary.path); },
+                "proof checker must independently reject TT checksum corruption");
     writeByte(temporary.path, first_record, original_key_byte);
 
     std::filesystem::resize_file(temporary.path, saved.file_size - 1);
@@ -1037,6 +1045,8 @@ void testPersistentTtRejectsIncompatibleAndCorruptFiles()
     Solver truncated_solver(truncated_game, options);
     checkThrows([&] { (void)TtFile::load(temporary.path, truncated_solver); },
                 "truncated persistent TT file must be rejected");
+    checkThrows([&] { (void)ProofTable::load(temporary.path); },
+                "proof checker must independently reject a truncated TT file");
 }
 
 void testPersistentSymmetryWitnessMapping()
@@ -1097,6 +1107,8 @@ void checkTiles(const std::array<unsigned, 16>& actual,
 {
     if (actual != expected) fail(message);
 }
+
+std::string readFile(const std::filesystem::path& path);
 
 void testRealGameApiAndThreeNodeSearch()
 {
@@ -1205,7 +1217,8 @@ void testRealGameApiAndThreeNodeSearch()
           "unlimited target-8 TT search must not report a node-limit cutoff");
     checkTraceIdsAreDfsDiscoveryOrder(*tt_result.root);
 
-    SearchResult symmetry_result = Solver(game, SolverOptions{8, 0, 0, true, true}).solve();
+    Solver symmetry_solver(game, SolverOptions{8, 0, 0, true, true});
+    SearchResult symmetry_result = symmetry_solver.solve();
     check(symmetry_result.outcome == tt_result.outcome &&
               symmetry_result.root_action == tt_result.root_action &&
               symmetry_result.root_action_value == tt_result.root_action_value,
@@ -1229,6 +1242,74 @@ void testRealGameApiAndThreeNodeSearch()
     check(symmetry_result.statistics.node_limit_cutoffs == 0,
           "unlimited target-8 symmetry TT search must not report a node-limit cutoff");
     checkTraceIdsAreDfsDiscoveryOrder(*symmetry_result.root);
+
+    TemporaryTtFile proof_tt;
+    const TtFileSummary proof_summary = TtFile::save(proof_tt.path, symmetry_solver);
+    TemporaryTtFile proof_sgf;
+    SgfMetadata proof_metadata;
+    proof_metadata.winning_tile = 8;
+    proof_metadata.use_transposition_table = true;
+    proof_metadata.use_tt_symmetry = true;
+    proof_metadata.save_tt = true;
+    proof_metadata.tt_path = proof_tt.path;
+    proof_metadata.tt_format_version = TtFile::kFormatVersion;
+    proof_metadata.tt_payload_checksum = proof_summary.payload_checksum;
+    proof_metadata.tt_file_size = proof_summary.file_size;
+    proof_metadata.tt_player_records = proof_summary.player_entries;
+    proof_metadata.tt_environment_records = proof_summary.environment_entries;
+    proof_metadata.opening = expected_opening;
+    proof_metadata.statistics = symmetry_result.statistics;
+    SgfWriter::write(proof_sgf.path, *symmetry_result.root, proof_metadata);
+
+    const ProofTable proof_table = ProofTable::load(proof_tt.path);
+    const ProofManifest proof_manifest = solver2048::readProofManifest(proof_sgf.path);
+    const ProofVerificationResult verified =
+        solver2048::verifyRootProof(proof_manifest, proof_table);
+    check(verified.root_outcome == Outcome::Win && verified.artifact_binding_verified,
+          "target-8 SGF + TT proof package must verify with a bound artifact");
+    check(verified.statistics.tt_records_verified == proof_summary.entries() &&
+              verified.statistics.terminal_states_checked != 0 &&
+              verified.statistics.witness_edges_checked != 0 &&
+              verified.statistics.universal_edges_checked != 0,
+          "target-8 proof checker traversal statistics are incomplete");
+    const solver2048::TraceVerificationStatistics trace_verified =
+        solver2048::verifySgfTrace(proof_sgf.path, proof_manifest, proof_table);
+    check(trace_verified.nodes_checked == trace_verified.actions_replayed + 1 &&
+              trace_verified.terminal_nodes_checked != 0 &&
+              trace_verified.backpropagation_nodes_checked != 0 &&
+              trace_verified.tt_leaves_checked != 0 &&
+              trace_verified.skipped_actions_checked != 0 &&
+              trace_verified.maximum_depth != 0,
+          "target-8 complete SGF trace audit statistics are incomplete");
+
+    TemporaryTtFile corrupt_trace;
+    std::string corrupt_sgf = readFile(proof_sgf.path);
+    const std::string valid_order = "dfs_visit_order = 2";
+    const std::size_t order_position = corrupt_sgf.find(valid_order);
+    check(order_position != std::string::npos,
+          "target-8 proof SGF lacks the expected second DFS visit");
+    corrupt_sgf.replace(order_position, valid_order.size(), "dfs_visit_order = 9");
+    {
+        std::ofstream output(
+            corrupt_trace.path, std::ios::out | std::ios::binary | std::ios::trunc);
+        output << corrupt_sgf;
+        check(static_cast<bool>(output), "cannot write corrupt trace fixture");
+    }
+    checkThrows(
+        [&] {
+            (void)solver2048::verifySgfTrace(
+                corrupt_trace.path, proof_manifest, proof_table);
+        },
+        "complete SGF trace audit must reject a corrupt DFS visit order");
+
+    ProofManifest wrong_claim = proof_manifest;
+    wrong_claim.root_outcome = Outcome::Loss;
+    checkThrows([&] { (void)solver2048::verifyRootProof(wrong_claim, proof_table); },
+                "proof checker must reject an incorrect SGF root outcome");
+    ProofManifest wrong_binding = proof_manifest;
+    ++*wrong_binding.tt_payload_checksum;
+    checkThrows([&] { (void)solver2048::verifyRootProof(wrong_binding, proof_table); },
+                "proof checker must reject an SGF/TT checksum binding mismatch");
 }
 
 std::string readFile(const std::filesystem::path& path)
