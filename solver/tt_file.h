@@ -21,6 +21,7 @@ public:
     static constexpr std::uint16_t kFormatVersion = 1;
     static constexpr std::uint16_t kHeaderSize = 128;
     static constexpr std::uint16_t kRecordSize = 16;
+    static constexpr std::uint16_t kWinOnlyFlag = 1u << 1;
 
     static TtFileSummary load(const std::filesystem::path& path, Solver& solver);
     static TtFileSummary save(const std::filesystem::path& path, const Solver& solver);

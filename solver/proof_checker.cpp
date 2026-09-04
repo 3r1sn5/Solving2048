@@ -29,7 +29,6 @@ constexpr std::uint32_t kBoardEncodingVersion = 1;
 constexpr std::uint32_t kChecksumAlgorithmCrc64Ecma = 1;
 constexpr std::uint16_t kSymmetryFlag = 1u << 0;
 constexpr std::uint8_t kWinCode = 1;
-constexpr std::uint8_t kLossCode = 2;
 constexpr std::uint8_t kNoWitness = 255;
 constexpr std::uint64_t kCrc64Polynomial = 0x42f0e1eba9ea3693ull;
 
@@ -101,8 +100,7 @@ void readExact(std::istream& input,
 Outcome decodeOutcome(std::uint8_t code)
 {
     if (code == kWinCode) return Outcome::Win;
-    if (code == kLossCode) return Outcome::Loss;
-    throw std::invalid_argument("outcome must be exact Win or Loss");
+    throw std::invalid_argument("Win-only TT outcome must be Win");
 }
 
 std::optional<SearchAction> decodeWitness(std::uint8_t code)
@@ -143,22 +141,14 @@ void validateProofEntry(std::uint64_t board_key,
         if (entry.children_total > 4) {
             throw std::invalid_argument("Player children_total exceeds four slides");
         }
-        if (entry.outcome == Outcome::Win) {
-            if (!entry.witness || entry.witness->kind != SearchAction::Kind::Slide) {
-                throw std::invalid_argument("Player Win entry requires a slide witness");
-            }
-        } else if (entry.witness) {
-            throw std::invalid_argument("Player Loss entry must not contain a witness");
+        if (!entry.witness || entry.witness->kind != SearchAction::Kind::Slide) {
+            throw std::invalid_argument("Player Win entry requires a slide witness");
         }
     } else {
         if (entry.children_total == 0 || entry.children_total > 32) {
             throw std::invalid_argument("Environment children_total must be in [1, 32]");
         }
-        if (entry.outcome == Outcome::Loss) {
-            if (!entry.witness || entry.witness->kind != SearchAction::Kind::Placement) {
-                throw std::invalid_argument("Environment Loss entry requires a placement witness");
-            }
-        } else if (entry.witness) {
+        if (entry.witness) {
             throw std::invalid_argument("Environment Win entry must not contain a witness");
         }
     }
@@ -1380,7 +1370,12 @@ ProofTable ProofTable::load(const std::filesystem::path& path)
     if (get16(header.data() + 10) != TtFile::kHeaderSize) fileFail(path, "unexpected header size");
     if (get16(header.data() + 12) != TtFile::kRecordSize) fileFail(path, "unexpected record size");
     const std::uint16_t flags = get16(header.data() + 14);
-    if ((flags & ~kSymmetryFlag) != 0) fileFail(path, "header contains unknown flags");
+    if ((flags & ~(kSymmetryFlag | TtFile::kWinOnlyFlag)) != 0) {
+        fileFail(path, "header contains unknown flags");
+    }
+    if ((flags & TtFile::kWinOnlyFlag) == 0) {
+        fileFail(path, "legacy Win/Loss TT is incompatible with Win-only proof lookup");
+    }
     const bool symmetry = (flags & kSymmetryFlag) != 0;
     if (get32(header.data() + 16) != kEndianMarker) fileFail(path, "invalid byte-order marker");
     if (get32(header.data() + 20) != kRulesVersion) fileFail(path, "incompatible rules version");

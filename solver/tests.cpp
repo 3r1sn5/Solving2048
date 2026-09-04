@@ -925,46 +925,49 @@ void testPlayerSymmetryTranspositionHitAndWitnessMapping()
           "symmetry Player hit must reference the original proof trace");
 }
 
-void testEnvironmentSymmetryTranspositionHitAndWitnessMapping()
+void testEnvironmentSymmetryWinTranspositionHit()
 {
     const Board source = asymmetricBoard();
     const Board rotated = solver2048::transformBoard(source, 1);
     constexpr int source_position = 1;
 
     FakeGame game;
-    game.slides[1] = {
-        slide(Direction::Up, source.raw),
-        slide(Direction::Right, rotated.raw),
-        slide(Direction::Down, 99),
+    game.slides[1] = {slide(Direction::Up, 10)};
+    game.values[10] = 30.0;
+    game.placements[10] = {
+        placement(0, 2, 20),
+        placement(0, 4, 21),
     };
-    game.values = {{source.raw, 30.0}, {rotated.raw, 20.0}, {99, 10.0}};
-    game.placements[source.raw] = {placement(source_position, 2, 88)};
-    game.winning_states.insert(99);
+    game.slides[20] = {slide(Direction::Up, source.raw)};
+    game.slides[21] = {slide(Direction::Right, rotated.raw)};
+    game.values[source.raw] = 20.0;
+    game.values[rotated.raw] = 10.0;
+    game.placements[source.raw] = {placement(source_position, 2, 30)};
+    game.winning_states.insert(30);
 
     SearchResult result = Solver(game, SolverOptions{8, 0, 0, true, true}).solve();
-    check(result.outcome == Outcome::Win && result.root_action == Direction::Down,
-          "root must continue past two symmetry-equivalent losing Environment actions");
+    check(result.outcome == Outcome::Win && result.root_action == Direction::Up,
+          "symmetry-equivalent winning Environment states must preserve root Win");
     check(result.statistics.environment_tt_hits == 1 &&
               result.statistics.environment_tt_symmetry_hits == 1,
-          "rotated Environment afterstate must produce one symmetry-derived TT hit");
+          "rotated winning Environment afterstate must produce one symmetry TT hit");
     check(result.statistics.environmentTtExactHits() == 0,
           "rotated Environment hit must not be counted as exact-orientation");
     check(game.placement_calls[source.raw] == 1 && game.placement_calls[rotated.raw] == 0,
           "Environment symmetry hit must not regenerate rotated placements");
 
-    const TraceNode& source_trace = *result.root->children[0];
-    const TraceNode& hit = *result.root->children[1];
-    check(source_trace.expanded && !source_trace.tt_hit,
-          "first Environment orientation must be the expanded TT source");
-    check(hit.tt_hit && hit.tt_symmetry_hit && hit.tt_transform.has_value(),
-          "rotated Environment occurrence must carry symmetry TT metadata");
-    check(hit.selected_action && hit.selected_action->kind == SearchAction::Kind::Placement &&
-              hit.selected_action->position ==
-                  solver2048::transformPosition(source_position, 1) &&
-              hit.selected_action->tile == 2,
-          "canonical Environment witness must map back to the rotated position");
+    const TraceNode& root_environment = *result.root->children[0];
+    const TraceNode& first_player = *root_environment.children[0];
+    const TraceNode& second_player = *root_environment.children[1];
+    const TraceNode& source_trace = *first_player.children[0];
+    const TraceNode& hit = *second_player.children[0];
+    check(source_trace.expanded && source_trace.outcome == Outcome::Win && !source_trace.tt_hit,
+          "first winning Environment orientation must be the expanded TT source");
+    check(hit.outcome == Outcome::Win && hit.tt_hit && hit.tt_symmetry_hit &&
+              hit.tt_transform.has_value() && !hit.selected_action,
+          "rotated Environment Win hit must carry symmetry metadata without a witness");
     check(hit.tt_source_trace_id && *hit.tt_source_trace_id == source_trace.trace_id,
-          "symmetry Environment hit must reference the original proof trace");
+          "symmetry Environment Win hit must reference the original proof trace");
 }
 
 void testNoCacheExpandsRepeatedStates()
@@ -1080,7 +1083,7 @@ FakeGame environmentTranspositionGame()
     return game;
 }
 
-void testEnvironmentTranspositionHitAndOutcomeConsistency()
+void testLossOutcomesAreNotCached()
 {
     FakeGame baseline_game = environmentTranspositionGame();
     SearchResult baseline = Solver(baseline_game, SolverOptions{8, 0, 0, false}).solve();
@@ -1103,37 +1106,29 @@ void testEnvironmentTranspositionHitAndOutcomeConsistency()
     check(baseline.statistics.ttHits() == 0 && baseline.statistics.ttStores() == 0,
           "TT-off outcome comparison must not use either table");
 
-    check(cached.statistics.environment_nodes == 1 && tt_game.placement_calls[10] == 1,
-          "Environment TT hit must avoid regenerating placements");
-    check(cached.statistics.player_nodes == 2,
-          "Environment TT hit must avoid revisiting the cached subtree");
-    check(cached.statistics.environment_tt_hits == 1 &&
-              cached.statistics.player_tt_hits == 0,
-          "repeated Environment afterstate must produce exactly one Environment TT hit");
-    check(cached.statistics.environment_tt_stores == 1 &&
-              cached.statistics.player_tt_stores == 2,
-          "exact Environment TT graph store counts are wrong");
+    check(cached.statistics.environment_nodes == baseline.statistics.environment_nodes &&
+              tt_game.placement_calls[10] == 2,
+          "a repeated losing Environment state must be expanded again");
+    check(cached.statistics.player_nodes == baseline.statistics.player_nodes,
+          "a repeated losing Player state must be expanded again");
+    check(cached.statistics.ttHits() == 0,
+          "Loss outcomes must never produce a TT hit");
+    check(cached.statistics.player_tt_stores == 1 &&
+              cached.statistics.environment_tt_stores == 0,
+          "only the final Player Win may be stored in the Win-only TT");
 
     check(cached.root->children.size() == 3,
           "Player must visit two losing actions before the final winning action");
     const TraceNode& source = *cached.root->children[0];
-    const TraceNode& hit = *cached.root->children[1];
+    const TraceNode& repeated = *cached.root->children[1];
     check(source.expanded && source.outcome == Outcome::Loss && !source.tt_hit,
-          "first Environment occurrence must be the expanded losing TT source");
-    check(hit.outcome == Outcome::Loss && hit.tt_hit && !hit.expanded && hit.children.empty(),
-          "second Environment occurrence must be a compact losing TT hit");
+          "first losing Environment occurrence must remain an expanded DFS node");
+    check(repeated.expanded && repeated.outcome == Outcome::Loss && !repeated.tt_hit &&
+              !repeated.tt_source_trace_id,
+          "second losing Environment occurrence must not become a TT leaf");
     check(source.solved_by == SolvedBy::Backpropagation &&
-              hit.solved_by == SolvedBy::TranspositionTable,
-          "Environment TT source/hit solved_by values are wrong");
-    check(hit.terminal_reason == TerminalReason::TranspositionTable,
-          "Environment TT hit must record TRANSPOSITION_TABLE as its terminal reason");
-    check(hit.tt_source_trace_id && *hit.tt_source_trace_id == source.trace_id,
-          "Environment TT hit must point to the first occurrence's trace ID");
-    check(hit.selected_action && hit.selected_action->kind == SearchAction::Kind::Placement &&
-              hit.selected_action->position == 0 && hit.selected_action->tile == 2,
-          "Environment TT hit must restore its decisive placement");
-    check(source.trace_id < hit.trace_id,
-          "Environment TT source must be discovered before its reference node");
+              repeated.solved_by == SolvedBy::Backpropagation,
+          "both losing Environment occurrences must be solved by backpropagation");
     checkTraceIdsAreDfsDiscoveryOrder(*cached.root);
 }
 
@@ -1463,14 +1458,14 @@ void testPersistentTtRoundTripAndCrossOpeningReuse()
     const SearchResult first = first_solver.solve();
     check(first.outcome == Outcome::Win && first.root_action == Direction::Right,
           "first persistent-TT fixture must prove Win after rejecting a losing action");
-    check(first.statistics.player_tt_stores == 2 &&
-              first.statistics.environment_tt_stores == 2,
-          "first persistent-TT fixture must create all four outcome/phase record forms");
+    check(first.statistics.player_tt_stores == 1 &&
+              first.statistics.environment_tt_stores == 1,
+          "first persistent-TT fixture must store only the two proven Win states");
 
     TemporaryTtFile temporary;
     const TtFileSummary first_saved = TtFile::save(temporary.path, first_solver);
-    check(first_saved.player_entries == 2 && first_saved.environment_entries == 2 &&
-              first_saved.file_size == TtFile::kHeaderSize + 4 * TtFile::kRecordSize,
+    check(first_saved.player_entries == 1 && first_saved.environment_entries == 1 &&
+              first_saved.file_size == TtFile::kHeaderSize + 2 * TtFile::kRecordSize,
           "persistent TT writer produced unexpected first snapshot counts or size");
     check(std::filesystem::file_size(temporary.path) == first_saved.file_size &&
               !std::filesystem::exists(temporary.path.string() + ".tmp"),
@@ -1488,14 +1483,14 @@ void testPersistentTtRoundTripAndCrossOpeningReuse()
 
     Solver second_solver(second_game, options);
     const TtFileSummary loaded = TtFile::load(temporary.path, second_solver);
-    check(loaded.player_entries == 2 && loaded.environment_entries == 2 &&
+    check(loaded.player_entries == 1 && loaded.environment_entries == 1 &&
               loaded.payload_checksum == first_saved.payload_checksum,
           "persistent TT round trip changed counts or checksum");
     const SearchResult second = second_solver.solve();
     check(second.outcome == Outcome::Win && second.root_action == Direction::Down,
           "second opening must reuse the first opening proof and remain Win");
-    check(second.statistics.player_tt_loaded_entries == 2 &&
-              second.statistics.environment_tt_loaded_entries == 2,
+    check(second.statistics.player_tt_loaded_entries == 1 &&
+              second.statistics.environment_tt_loaded_entries == 1,
           "loaded TT entry counters are wrong");
     check(second.statistics.player_persistent_tt_hits == 1 &&
               second.statistics.environment_persistent_tt_hits == 0,
@@ -1515,7 +1510,7 @@ void testPersistentTtRoundTripAndCrossOpeningReuse()
           "persistent Player witness or reward + V action value was not restored");
 
     const TtFileSummary merged = TtFile::save(temporary.path, second_solver);
-    check(merged.player_entries == 3 && merged.environment_entries == 3,
+    check(merged.player_entries == 2 && merged.environment_entries == 2,
           "second opening must merge two new states into the persistent snapshot");
 
     FakeGame third_game = second_game;
@@ -1547,6 +1542,8 @@ void testPersistentTtRejectsIncompatibleAndCorruptFiles()
     const TtFileSummary saved = TtFile::save(temporary.path, source);
     check(saved.player_entries == 1 && saved.environment_entries == 0,
           "corruption fixture must contain one Player record");
+    check((readByte(temporary.path, 14) & TtFile::kWinOnlyFlag) != 0,
+          "persistent TT header must declare Win-only semantics");
 
     FakeGame wrong_target_game(1);
     Solver wrong_target(wrong_target_game, SolverOptions{16, 0, 0, true, false});
@@ -1559,6 +1556,29 @@ void testPersistentTtRejectsIncompatibleAndCorruptFiles()
                 "persistent TT with a different symmetry mode must be rejected");
 
     constexpr std::uint64_t first_record = TtFile::kHeaderSize;
+    const std::uint8_t original_flags = readByte(temporary.path, 14);
+    writeByte(
+        temporary.path,
+        14,
+        static_cast<std::uint8_t>(original_flags & ~TtFile::kWinOnlyFlag));
+    FakeGame legacy_game(1);
+    Solver legacy_solver(legacy_game, options);
+    checkThrows([&] { (void)TtFile::load(temporary.path, legacy_solver); },
+                "legacy Win/Loss TT must be rejected by the Win-only Solver");
+    checkThrows([&] { (void)ProofTable::load(temporary.path); },
+                "proof checker must reject a TT without Win-only semantics");
+    writeByte(temporary.path, 14, original_flags);
+
+    const std::uint8_t original_outcome = readByte(temporary.path, first_record + 8);
+    writeByte(temporary.path, first_record + 8, 2);
+    FakeGame loss_record_game(1);
+    Solver loss_record_solver(loss_record_game, options);
+    checkThrows([&] { (void)TtFile::load(temporary.path, loss_record_solver); },
+                "Win-only persistent TT must reject a Loss record");
+    checkThrows([&] { (void)ProofTable::load(temporary.path); },
+                "proof checker must reject a Loss TT record");
+    writeByte(temporary.path, first_record + 8, original_outcome);
+
     const std::uint8_t original_witness = readByte(temporary.path, first_record + 9);
     writeByte(temporary.path, first_record + 9, 42);
     FakeGame invalid_witness_game(1);
@@ -2347,12 +2367,11 @@ int main()
         {"D4 canonicalization and action transforms", testD4CanonicalizationAndActionTransforms},
         {"Player symmetry TT hit and witness mapping",
          testPlayerSymmetryTranspositionHitAndWitnessMapping},
-        {"Environment symmetry TT hit and witness mapping",
-         testEnvironmentSymmetryTranspositionHitAndWitnessMapping},
+        {"Environment symmetry Win TT hit",
+         testEnvironmentSymmetryWinTranspositionHit},
         {"no-cache repeated state expansion", testNoCacheExpandsRepeatedStates},
         {"Player transposition-table hit", testPlayerTranspositionHit},
-        {"Environment TT hit and outcome consistency",
-         testEnvironmentTranspositionHitAndOutcomeConsistency},
+        {"Loss outcomes are not cached", testLossOutcomesAreNotCached},
         {"Unknown outcomes are not cached", testUnknownOutcomesAreNotCached},
         {"combined node-limit Unknown semantics", testNodeLimitReturnsUnknownForEveryAttemptedChild},
         {"persistent RZone round trip and max-cell indexing",

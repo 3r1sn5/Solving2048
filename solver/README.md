@@ -96,10 +96,11 @@ solver/solver2048 --winning-tile 8 --node-limit 0 --tt --tt-symmetry \
 ```
 
 The TT uses separate Player and Environment maps keyed by the raw 64-bit board.
-It stores only exact `WIN` or `LOSS` results. A node-limit `UNKNOWN` is never
-stored. TT hits are emitted to SGF as exact reference leaves pointing back to
-the first trace node that proved that state, or to a persistent `(phase, key)`
-when loaded from disk. Set `use_transposition_table=false` and
+Like RZone, it stores only proven `WIN` results derived upward from winning
+terminals. `LOSS` and node-limit `UNKNOWN` still propagate through the search
+but are never cached. TT hits are emitted to SGF as exact Win reference leaves
+pointing back to the first trace node that proved that state, or to a persistent
+`(phase, key)` when loaded from disk. Set `use_transposition_table=false` and
 `use_tt_symmetry=false` in a separate cfg, or use `--no-tt`, to restore the
 path-expanded baseline; `--no-tt` also disables persistent load/save.
 
@@ -113,12 +114,14 @@ atomically renamed after search. The file is tied to the winning tile, rules,
 board encoding, and symmetry mode, but not to an opening or N-tuple model, so it
 can be reused and extended by another fixed opening.
 
-The v1 snapshot uses a 128-byte little-endian header, separate Player and
+The v1 snapshot uses a 128-byte little-endian header with a required `WIN_ONLY`
+feature flag, separate Player and
 Environment sections, fixed 16-byte records, and a CRC64-ECMA payload checksum.
-Records contain only canonical/raw board key, exact outcome, existential
-witness, and legal-child count. Run-local trace IDs and action values are not
-persisted. Incompatible or corrupt files are rejected before their entries are
-published to the solver.
+Every record has a fixed Win outcome; Player records carry an existential slide
+witness, while Environment Win records have no witness. Records also preserve
+the canonical/raw board key and legal-child count. Run-local trace IDs and action
+values are not persisted. Incompatible or corrupt files are rejected before
+their entries are published to the solver.
 
 Persistent controls can be overridden without editing cfg:
 

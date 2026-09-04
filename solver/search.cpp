@@ -240,8 +240,8 @@ bool Solver::lookupPlayerTransposition(Board board, TraceNode& trace)
     if (found == player_tt_.end()) return false;
 
     const TranspositionEntry& entry = found->second;
-    if (entry.outcome == Outcome::Unknown) {
-        throw std::logic_error("Player TT contained an inexact Unknown entry");
+    if (entry.outcome != Outcome::Win) {
+        throw std::logic_error("Player TT contained a non-Win entry");
     }
     ++statistics_.player_tt_hits;
     if (entry.persistent) ++statistics_.player_persistent_tt_hits;
@@ -278,8 +278,8 @@ bool Solver::lookupEnvironmentTransposition(Board afterstate, TraceNode& trace)
     if (found == environment_tt_.end()) return false;
 
     const TranspositionEntry& entry = found->second;
-    if (entry.outcome == Outcome::Unknown) {
-        throw std::logic_error("Environment TT contained an inexact Unknown entry");
+    if (entry.outcome != Outcome::Win) {
+        throw std::logic_error("Environment TT contained a non-Win entry");
     }
     ++statistics_.environment_tt_hits;
     if (entry.persistent) ++statistics_.environment_persistent_tt_hits;
@@ -305,7 +305,7 @@ bool Solver::lookupEnvironmentTransposition(Board afterstate, TraceNode& trace)
 
 void Solver::storePlayerTransposition(Board board, const TraceNode& trace)
 {
-    if (!options_.use_transposition_table || trace.outcome == Outcome::Unknown) return;
+    if (!options_.use_transposition_table || trace.outcome != Outcome::Win) return;
     const CanonicalBoard key = transpositionKey(board);
     TranspositionEntry entry;
     entry.outcome = trace.outcome;
@@ -315,15 +315,15 @@ void Solver::storePlayerTransposition(Board board, const TraceNode& trace)
     entry.selected_action_value = trace.selected_action_value;
     entry.source_transform = key.transform;
     const auto [found, inserted] = player_tt_.emplace(key.board.raw, std::move(entry));
-    if (!inserted && found->second.outcome != trace.outcome) {
-        throw std::logic_error("conflicting exact outcomes for one Player TT key");
+    if (!inserted && found->second.outcome != Outcome::Win) {
+        throw std::logic_error("Player TT contains a non-Win entry");
     }
     if (inserted) ++statistics_.player_tt_stores;
 }
 
 void Solver::storeEnvironmentTransposition(Board afterstate, const TraceNode& trace)
 {
-    if (!options_.use_transposition_table || trace.outcome == Outcome::Unknown) return;
+    if (!options_.use_transposition_table || trace.outcome != Outcome::Win) return;
     const CanonicalBoard key = transpositionKey(afterstate);
     TranspositionEntry entry;
     entry.outcome = trace.outcome;
@@ -333,8 +333,8 @@ void Solver::storeEnvironmentTransposition(Board afterstate, const TraceNode& tr
     entry.selected_action_value = trace.selected_action_value;
     entry.source_transform = key.transform;
     const auto [found, inserted] = environment_tt_.emplace(key.board.raw, std::move(entry));
-    if (!inserted && found->second.outcome != trace.outcome) {
-        throw std::logic_error("conflicting exact outcomes for one Environment TT key");
+    if (!inserted && found->second.outcome != Outcome::Win) {
+        throw std::logic_error("Environment TT contains a non-Win entry");
     }
     if (inserted) ++statistics_.environment_tt_stores;
 }

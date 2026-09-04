@@ -23,7 +23,6 @@ constexpr std::uint32_t kBoardEncodingVersion = 1;
 constexpr std::uint32_t kChecksumAlgorithmCrc64Ecma = 1;
 constexpr std::uint16_t kSymmetryFlag = 1u << 0;
 constexpr std::uint8_t kWinCode = 1;
-constexpr std::uint8_t kLossCode = 2;
 constexpr std::uint8_t kNoWitness = 255;
 constexpr std::uint64_t kCrc64Polynomial = 0x42f0e1eba9ea3693ull;
 
@@ -120,15 +119,13 @@ void updateCrc64(std::uint64_t& crc, const std::uint8_t* data, std::size_t size)
 std::uint8_t encodeOutcome(Outcome outcome)
 {
     if (outcome == Outcome::Win) return kWinCode;
-    if (outcome == Outcome::Loss) return kLossCode;
-    throw std::logic_error("persistent TT cannot encode an Unknown outcome");
+    throw std::logic_error("persistent TT can only encode Win outcomes");
 }
 
 Outcome decodeOutcome(std::uint8_t outcome)
 {
     if (outcome == kWinCode) return Outcome::Win;
-    if (outcome == kLossCode) return Outcome::Loss;
-    throw std::invalid_argument("outcome must be exact Win or Loss");
+    throw std::invalid_argument("Win-only TT outcome must be Win");
 }
 
 std::uint8_t encodeWitness(const std::optional<SearchAction>& witness)
@@ -150,7 +147,7 @@ std::optional<SearchAction> decodeWitness(std::uint8_t witness)
 
 void validateRecord(const DiskRecord& record, Phase phase, bool symmetry)
 {
-    const Outcome outcome = decodeOutcome(record.outcome);
+    (void)decodeOutcome(record.outcome);
     const std::optional<SearchAction> witness = decodeWitness(record.witness);
     if (record.flags != 0 || record.reserved != 0) {
         throw std::invalid_argument("record flags and reserved fields must be zero");
@@ -159,22 +156,14 @@ void validateRecord(const DiskRecord& record, Phase phase, bool symmetry)
         if (record.children_total > 4) {
             throw std::invalid_argument("Player children_total exceeds four slides");
         }
-        if (outcome == Outcome::Win) {
-            if (!witness || witness->kind != SearchAction::Kind::Slide) {
-                throw std::invalid_argument("Player Win entry requires a slide witness");
-            }
-        } else if (witness) {
-            throw std::invalid_argument("Player Loss entry must not contain a witness");
+        if (!witness || witness->kind != SearchAction::Kind::Slide) {
+            throw std::invalid_argument("Player Win entry requires a slide witness");
         }
     } else {
         if (record.children_total == 0 || record.children_total > 32) {
             throw std::invalid_argument("Environment children_total must be in [1, 32]");
         }
-        if (outcome == Outcome::Loss) {
-            if (!witness || witness->kind != SearchAction::Kind::Placement) {
-                throw std::invalid_argument("Environment Loss entry requires a placement witness");
-            }
-        } else if (witness) {
+        if (witness) {
             throw std::invalid_argument("Environment Win entry must not contain a witness");
         }
     }
@@ -251,7 +240,8 @@ std::array<std::uint8_t, TtFile::kHeaderSize> makeHeader(
     put16(header.data() + 8, TtFile::kFormatVersion);
     put16(header.data() + 10, TtFile::kHeaderSize);
     put16(header.data() + 12, TtFile::kRecordSize);
-    put16(header.data() + 14, symmetry ? kSymmetryFlag : 0);
+    put16(header.data() + 14,
+          TtFile::kWinOnlyFlag | (symmetry ? kSymmetryFlag : 0));
     put32(header.data() + 16, kEndianMarker);
     put32(header.data() + 20, kRulesVersion);
     put32(header.data() + 24, kBoardEncodingVersion);
@@ -295,7 +285,12 @@ TtFileSummary TtFile::load(const std::filesystem::path& path, Solver& solver)
     if (get16(header.data() + 10) != kHeaderSize) fail(path, "unexpected header size");
     if (get16(header.data() + 12) != kRecordSize) fail(path, "unexpected record size");
     const std::uint16_t flags = get16(header.data() + 14);
-    if ((flags & ~kSymmetryFlag) != 0) fail(path, "header contains unknown flags");
+    if ((flags & ~(kSymmetryFlag | TtFile::kWinOnlyFlag)) != 0) {
+        fail(path, "header contains unknown flags");
+    }
+    if ((flags & TtFile::kWinOnlyFlag) == 0) {
+        fail(path, "legacy Win/Loss TT is incompatible with Win-only lookup");
+    }
     const bool symmetry = (flags & kSymmetryFlag) != 0;
     if (get32(header.data() + 16) != kEndianMarker) fail(path, "invalid byte-order marker");
     if (get32(header.data() + 20) != kRulesVersion) fail(path, "incompatible rules version");
