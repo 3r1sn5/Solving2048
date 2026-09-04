@@ -176,7 +176,7 @@ function solvedByOf(node) {
   if (!node) return "UNKNOWN";
   if (node.synthetic) return "SKIPPED";
   const explicit = commentValue(node, "solved_by").toUpperCase();
-  if (["TERMINAL", "TT", "BACKPROPAGATION", "NODE_LIMIT"].includes(explicit)) return explicit;
+  if (["TERMINAL", "TT", "RZONE_TT", "BACKPROPAGATION", "NODE_LIMIT"].includes(explicit)) return explicit;
   const reason = commentValue(node, "terminal_reason").toUpperCase();
   if (isTtHit(node)) return "TT";
   if (reason === "WINNING_TILE" || reason === "NO_LEGAL_MOVE") return "TERMINAL";
@@ -1002,6 +1002,10 @@ function bootViewer() {
       ["TT reference", ttHit ? `HIT → ${ttReferenceLabel(selected)}` : "no"],
       ["TT symmetry hit", ttHit ? (symmetryTtHit ? "yes" : "no") : "—"],
       ["TT transform", ttHit ? commentValue(selected, "tt_transform") : ""],
+      ["RZone certificate", commentValue(selected, "rzone_certificate_id")],
+      ["RZone symmetry hit", commentValue(selected, "rzone_certificate_id")
+        ? commentValue(selected, "rzone_symmetry_hit") : "—"],
+      ["RZone transform", commentValue(selected, "rzone_transform")],
       ["Reward", commentValue(selected, "reward")],
       ["V(afterstate)", commentValue(selected, "afterstate_value") || commentValue(selected, "v")],
       ["Reward + V", commentValue(selected, "action_value")],
@@ -1027,6 +1031,10 @@ function bootViewer() {
         ["Environment TT new", commentValue(selected, "environment_tt_new_entries")],
         ["Player TT entries", commentValue(selected, "player_tt_entries")],
         ["Environment TT entries", commentValue(selected, "environment_tt_entries")],
+        ["RZone symmetry mode", commentValue(selected, "rzone_symmetry")],
+        ["RZone exact hits", commentValue(selected, "rzone_exact_orientation_hits")],
+        ["RZone symmetry hits", commentValue(selected, "rzone_symmetry_hits")],
+        ["RZone transforms tested", commentValue(selected, "rzone_lookup_transforms_tested")],
       );
     }
     for (const [label, value] of values) elements.metrics.appendChild(metric(label, value));

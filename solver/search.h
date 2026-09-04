@@ -81,6 +81,8 @@ struct TraceNode {
     bool tt_symmetry_hit = false;
     std::optional<std::uint8_t> tt_transform;
     bool rzone_hit = false;
+    bool rzone_symmetry_hit = false;
+    std::optional<std::uint8_t> rzone_transform;
     std::optional<RZoneCertificateId> rzone_certificate_id;
     std::optional<RZoneStepKind> rzone_kind;
     std::optional<std::uint16_t> rzone_mask;
@@ -143,6 +145,7 @@ struct SolverOptions {
     bool use_tt_symmetry = false;
     RZoneMode rzone_mode = RZoneMode::Disabled;
     RZoneLookupPolicy rzone_lookup_policy = RZoneLookupPolicy::FullScan;
+    bool use_rzone_symmetry = false;
     unsigned rzone_max_cells = 16;
     bool rzone_shadow_exact_check = false;
 };
@@ -188,7 +191,11 @@ private:
     bool lookupPlayerTransposition(Board board, TraceNode& trace);
     bool lookupEnvironmentTransposition(Board afterstate, TraceNode& trace);
     bool lookupRZone(Board board, Phase phase, TraceNode& trace);
-    void annotateRZone(TraceNode& trace, RZoneCertificateId id, bool hit);
+    void annotateRZone(
+        TraceNode& trace,
+        RZoneCertificateId id,
+        bool hit,
+        std::uint8_t transform = 0);
     void createTerminalRZone(Board board, TraceNode& trace);
     void liftPlayerRZone(
         Board board, Direction direction, const TraceNode& child, TraceNode& trace);

@@ -43,6 +43,7 @@ struct ProofManifest {
     std::uint64_t node_limit = 0;
     bool transposition_table = false;
     bool tt_symmetry = false;
+    bool rzone_symmetry = false;
     std::filesystem::path declared_tt_path;
     std::optional<std::uint16_t> tt_format_version;
     std::optional<std::uint64_t> tt_payload_checksum;

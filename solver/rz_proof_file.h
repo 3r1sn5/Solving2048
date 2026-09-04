@@ -37,7 +37,11 @@ public:
         bool include_symmetry = false) const;
     std::uint64_t prefixChecksum(std::uint64_t record_count) const;
 
-    static bool matches(const RzProofEntry& entry, Board board, Phase phase);
+    static bool matches(
+        const RzProofEntry& entry,
+        Board board,
+        Phase phase,
+        std::uint8_t transform = 0);
 
 private:
     using PatternBucket =

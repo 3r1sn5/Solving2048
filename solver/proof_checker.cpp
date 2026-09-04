@@ -507,6 +507,8 @@ struct TraceRecord {
     std::optional<std::uint64_t> tt_source_node_id;
     std::optional<std::uint8_t> tt_transform;
     std::optional<bool> rzone_hit;
+    std::optional<bool> rzone_symmetry_hit;
+    std::optional<std::uint8_t> rzone_transform;
     std::optional<RZoneCertificateId> rzone_certificate_id;
     std::optional<RZoneStepKind> rzone_kind;
     std::optional<std::uint16_t> rzone_mask;
@@ -600,6 +602,24 @@ TraceRecord parseTraceRecord(const Properties& properties,
     const auto rzone_hit = fields.find("rzone_hit");
     if (rzone_hit != fields.end()) {
         record.rzone_hit = parseBoolean(rzone_hit->second, "rzone_hit", path);
+    }
+    const auto rzone_symmetry_hit = fields.find("rzone_symmetry_hit");
+    if (rzone_symmetry_hit != fields.end()) {
+        record.rzone_symmetry_hit = parseBoolean(
+            rzone_symmetry_hit->second, "rzone_symmetry_hit", path);
+    }
+    const auto rzone_transform = fields.find("rzone_transform");
+    if (rzone_transform != fields.end()) {
+        const std::size_t colon = rzone_transform->second.find(':');
+        const std::string number = rzone_transform->second.substr(0, colon);
+        const unsigned value = parseUnsigned<unsigned>(number, "rzone_transform", path);
+        if (value >= 8) fileFail(path, "SGF rzone_transform must be in [0, 7]");
+        record.rzone_transform = static_cast<std::uint8_t>(value);
+        if (colon != std::string::npos &&
+            rzone_transform->second.substr(colon + 1) !=
+                symmetryTransformName(record.rzone_transform.value())) {
+            fileFail(path, "SGF rzone_transform number and name disagree");
+        }
     }
     const auto rzone_certificate_id = fields.find("rzone_certificate_id");
     if (rzone_certificate_id != fields.end()) {
@@ -697,10 +717,12 @@ class LogicalVerifier {
 public:
     LogicalVerifier(const ProofTable& table,
                     const RzProofTable* rzone_table,
-                    RZoneCertificateId rzone_maximum_id)
+                    RZoneCertificateId rzone_maximum_id,
+                    bool rzone_symmetry)
         : table_(table),
           rzone_table_(rzone_table),
-          rzone_maximum_id_(rzone_maximum_id) {}
+          rzone_maximum_id_(rzone_maximum_id),
+          rzone_symmetry_(rzone_symmetry) {}
 
     ProofVerificationStatistics verify(Board root, Phase phase, Outcome expected)
     {
@@ -735,7 +757,7 @@ private:
         }
         if (expected == Outcome::Win && rzone_table_ &&
             rzone_table_->findMatching(
-                board, phase, rzone_maximum_id_, table_.usesSymmetry())) {
+                board, phase, rzone_maximum_id_, rzone_symmetry_)) {
             ++statistics_.rzone_certificates_used;
             return;
         }
@@ -825,6 +847,7 @@ private:
     const ProofTable& table_;
     const RzProofTable* rzone_table_ = nullptr;
     RZoneCertificateId rzone_maximum_id_ = kNoRZoneCertificate;
+    bool rzone_symmetry_ = false;
     ProofVerificationStatistics statistics_;
     std::unordered_set<StateKey, StateKeyHash> visiting_;
     std::unordered_set<StateKey, StateKeyHash> verified_;
@@ -1068,6 +1091,17 @@ private:
         if (present != 6) {
             fail(board, record.phase, "RZone certificate annotation is incomplete");
         }
+        if (record.rzone_symmetry_hit.has_value() != record.rzone_transform.has_value()) {
+            fail(board, record.phase, "RZone symmetry annotation is incomplete");
+        }
+        const std::uint8_t transform = record.rzone_transform.value_or(0);
+        if (transform != 0 && !manifest_.rzone_symmetry) {
+            fail(board, record.phase, "RZone transform is present while symmetry lookup is disabled");
+        }
+        if (record.rzone_symmetry_hit &&
+            *record.rzone_symmetry_hit != (transform != 0)) {
+            fail(board, record.phase, "rzone_symmetry_hit disagrees with rzone_transform");
+        }
         if (!rzone_table_) {
             fail(board, record.phase, "RZone annotation has no bound .rz artifact");
         }
@@ -1077,7 +1111,7 @@ private:
         }
         const RzProofEntry* entry = rzone_table_->find(id);
         if (!entry) fail(board, record.phase, "RZone certificate ID is absent from the supplied file");
-        if (!RzProofTable::matches(*entry, board, record.phase)) {
+        if (!RzProofTable::matches(*entry, board, record.phase, transform)) {
             fail(board, record.phase, "RZone certificate does not match this board and phase");
         }
         if (record.outcome != Outcome::Win) {
@@ -1238,7 +1272,9 @@ private:
             }
             SearchAction action;
             action.kind = SearchAction::Kind::Slide;
-            action.direction = *entry.slide;
+            action.direction = transformDirection(
+                *entry.slide,
+                inverseTransform(record.rzone_transform.value_or(0)));
             expected_action = action;
         } else if (entry.kind != RZoneStepKind::UniversalPlacement) {
             fail(board, record.phase,
@@ -1507,6 +1543,15 @@ ProofManifest readProofManifest(const std::filesystem::path& sgf_path)
     if (manifest.tt_symmetry && !manifest.transposition_table) {
         fileFail(sgf_path, "SGF enables TT symmetry while the transposition table is disabled");
     }
+    const auto rzone_symmetry = fields.find("rzone_symmetry");
+    if (rzone_symmetry != fields.end()) {
+        manifest.rzone_symmetry = parseEnabled(
+            rzone_symmetry->second, "rzone_symmetry", sgf_path);
+    } else {
+        // Before RZone gained an independent setting, the logical verifier
+        // followed TT symmetry. Preserve that sound behavior for old SGFs.
+        manifest.rzone_symmetry = manifest.tt_symmetry;
+    }
     const auto fixed_opening = fields.find("fixed_opening");
     if (fixed_opening != fields.end()) {
         std::ostringstream expected;
@@ -1577,7 +1622,8 @@ ProofVerificationResult verifyRootProof(const ProofManifest& manifest,
     LogicalVerifier verifier(
         table,
         rzone_artifact_binding_verified ? rzone_table : nullptr,
-        rzone_maximum_id);
+        rzone_maximum_id,
+        manifest.rzone_symmetry);
     ProofVerificationResult result;
     result.root_outcome = manifest.root_outcome;
     result.artifact_binding_verified = artifact_binding_verified;

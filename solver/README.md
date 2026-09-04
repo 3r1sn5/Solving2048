@@ -61,6 +61,7 @@ save_tt=true
 tt_path=result/RZ/8_RZ.tt
 rzone_mode=lookup
 rzone_lookup_policy=smallest_first
+use_rzone_symmetry=true
 rzone_max_cells=16
 rzone_shadow_exact_check=false
 load_rz=false
@@ -167,15 +168,22 @@ recorded for diagnostics and tie-breaking but does not limit derivation.
 `rzone_lookup_policy=full_scan` preserves the original policy: scan every
 indexed mask and choose the globally smallest-cell certificate, then shortest
 depth and oldest ID. `smallest_first` groups masks by cell count, checks groups
-from one to sixteen cells, and returns on the first valid match. It still
-guarantees minimum cell count because every smaller group has already missed,
-but deliberately skips the depth/ID global tie-break to avoid scanning the
-remaining equal/larger masks. Each indexed mask also stores its pre-expanded
+from one to sixteen cells, completes the depth/ID/transform tie-break within
+the first matching cell-count group, and then returns. It guarantees minimum
+cell count because every smaller group has already missed. Each indexed mask also stores its pre-expanded
 64-bit nibble mask, so lookup performs one AND instead of rebuilding it from
 sixteen cells.
 
-This first version stores only Player-view Win proofs and does not canonicalize
-RZone patterns over symmetry in the Solver lookup index. Exact TT remains the
+`use_rzone_symmetry=true` (or `--rzone-symmetry`) computes all eight D4 versions
+of the candidate board and searches the existing one-copy index. The returned
+transform maps the current board into the stored certificate orientation;
+Player slide witnesses are mapped back before use. Parent lifting is performed
+in that same stored orientation, so `.rz` v1 needs no new edge field and lookup
+still performs no certificate replay. The SGF records `rzone_symmetry_hit` and
+`rzone_transform`, which the proof checker independently validates. Use
+`--no-rzone-symmetry` for the exact-orientation baseline.
+
+This first version stores only Player-view Win proofs. Exact TT remains the
 fallback for Loss results and Win states whose RZone derivation stops. RZone
 certificates can be loaded, extended, and atomically saved as a `.rz` snapshot.
 SGF binds the child-first record prefix used by its solve, so another opening

@@ -20,6 +20,7 @@ struct SolverConfig {
     std::filesystem::path tt_path;
     RZoneMode rzone_mode = RZoneMode::Disabled;
     RZoneLookupPolicy rzone_lookup_policy = RZoneLookupPolicy::FullScan;
+    bool use_rzone_symmetry = false;
     unsigned rzone_max_cells = 16;
     bool rzone_shadow_exact_check = false;
     bool load_rz = false;

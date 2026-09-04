@@ -45,11 +45,13 @@ std::array<int, kBoardSize> linePositions(Direction direction, int line)
 RZoneTable::RZoneTable(const Game& game,
                        unsigned winning_tile,
                        unsigned max_cells,
-                       RZoneLookupPolicy lookup_policy)
+                       RZoneLookupPolicy lookup_policy,
+                       bool use_symmetry)
     : game_(game),
       winning_tile_(winning_tile),
       max_cells_(max_cells),
-      lookup_policy_(lookup_policy)
+      lookup_policy_(lookup_policy),
+      use_symmetry_(use_symmetry)
 {
     if (winning_tile_ < 2 || (winning_tile_ & (winning_tile_ - 1)) != 0) {
         throw std::invalid_argument("RZone winning tile must be a power of two");
@@ -331,94 +333,126 @@ std::optional<RZoneCertificateId> RZoneTable::liftUniversalPlacement(
     return id;
 }
 
-std::optional<RZoneCertificateId> RZoneTable::lookup(Board board, Phase phase)
+std::optional<RZoneMatch> RZoneTable::lookup(Board board, Phase phase)
 {
     ++statistics_.lookups;
-    if (lookup_policy_ == RZoneLookupPolicy::SmallestFirst) {
-        return lookupSmallestFirst(board, phase);
+    std::array<Board, 8> candidates{};
+    const unsigned transform_count = use_symmetry_ ? 8 : 1;
+    for (unsigned transform = 0; transform < transform_count; ++transform) {
+        candidates[transform] = transform == 0
+            ? board
+            : transformBoard(board, static_cast<std::uint8_t>(transform));
     }
-    return lookupFullScan(board, phase);
+    statistics_.lookup_transforms_tested += transform_count;
+    if (lookup_policy_ == RZoneLookupPolicy::SmallestFirst) {
+        return lookupSmallestFirst(candidates, transform_count, phase);
+    }
+    return lookupFullScan(candidates, transform_count, phase);
 }
 
-std::optional<RZoneCertificateId> RZoneTable::recordLookupHit(
+std::optional<RZoneMatch> RZoneTable::recordLookupHit(
     const RZoneCertificate* certificate,
-    Phase phase)
+    Phase phase,
+    std::uint8_t transform)
 {
     if (!certificate) return std::nullopt;
     if (phase == Phase::Player) ++statistics_.player_hits;
     else ++statistics_.environment_hits;
+    if (transform == 0) ++statistics_.exact_orientation_hits;
+    else ++statistics_.symmetry_hits;
     if (certificate->mask == std::numeric_limits<std::uint16_t>::max()) {
         ++statistics_.full_board_hits;
     } else {
         ++statistics_.partial_hits;
     }
-    return certificate->id;
+    return RZoneMatch{certificate->id, transform};
 }
 
-std::optional<RZoneCertificateId> RZoneTable::lookupFullScan(Board board, Phase phase)
+std::optional<RZoneMatch> RZoneTable::lookupFullScan(
+    const std::array<Board, 8>& candidates,
+    unsigned transform_count,
+    Phase phase)
 {
     const RZoneCertificate* best = nullptr;
+    std::uint8_t best_transform = 0;
     for (unsigned cells = 1; cells <= max_cells_; ++cells) {
-        for (const MaskIndexEntry& indexed : masks_by_cell_count_[cells]) {
-            ++statistics_.lookup_masks_tested;
-            const auto mask_entry = patterns_.find(indexed.mask);
-            if (mask_entry == patterns_.end()) {
-                throw std::logic_error("RZone ordered mask index is inconsistent");
-            }
-            const auto found = mask_entry->second.find(board.raw & indexed.nibble_mask);
-            if (found == mask_entry->second.end()) continue;
-            statistics_.lookup_candidates += found->second.size();
-            for (const RZoneCertificateId id : found->second) {
-                const RZoneCertificate* certificate = find(id);
-                if (!certificate || !certificate->validated || certificate->phase != phase ||
-                    certificate->winning_tile != winning_tile_) {
-                    continue;
+        for (unsigned transform = 0; transform < transform_count; ++transform) {
+            for (const MaskIndexEntry& indexed : masks_by_cell_count_[cells]) {
+                ++statistics_.lookup_masks_tested;
+                const auto mask_entry = patterns_.find(indexed.mask);
+                if (mask_entry == patterns_.end()) {
+                    throw std::logic_error("RZone ordered mask index is inconsistent");
                 }
-                ++statistics_.pattern_matches;
-                const unsigned certificate_cells = countCells(certificate->mask);
-                if (!best || certificate_cells < countCells(best->mask) ||
-                    (certificate_cells == countCells(best->mask) &&
-                     certificate->depth < best->depth) ||
-                    (certificate_cells == countCells(best->mask) &&
-                     certificate->depth == best->depth && certificate->id < best->id)) {
-                    best = certificate;
+                const auto found = mask_entry->second.find(
+                    candidates[transform].raw & indexed.nibble_mask);
+                if (found == mask_entry->second.end()) continue;
+                statistics_.lookup_candidates += found->second.size();
+                for (const RZoneCertificateId id : found->second) {
+                    const RZoneCertificate* certificate = find(id);
+                    if (!certificate || !certificate->validated || certificate->phase != phase ||
+                        certificate->winning_tile != winning_tile_) {
+                        continue;
+                    }
+                    ++statistics_.pattern_matches;
+                    const unsigned certificate_cells = countCells(certificate->mask);
+                    if (!best || certificate_cells < countCells(best->mask) ||
+                        (certificate_cells == countCells(best->mask) &&
+                         certificate->depth < best->depth) ||
+                        (certificate_cells == countCells(best->mask) &&
+                         certificate->depth == best->depth && certificate->id < best->id) ||
+                        (certificate_cells == countCells(best->mask) &&
+                         certificate->depth == best->depth && certificate->id == best->id &&
+                         transform < best_transform)) {
+                        best = certificate;
+                        best_transform = static_cast<std::uint8_t>(transform);
+                    }
                 }
             }
         }
     }
-    return recordLookupHit(best, phase);
+    return recordLookupHit(best, phase, best_transform);
 }
 
-std::optional<RZoneCertificateId> RZoneTable::lookupSmallestFirst(Board board, Phase phase)
+std::optional<RZoneMatch> RZoneTable::lookupSmallestFirst(
+    const std::array<Board, 8>& candidates,
+    unsigned transform_count,
+    Phase phase)
 {
     for (unsigned cells = 1; cells <= max_cells_; ++cells) {
-        for (const MaskIndexEntry& indexed : masks_by_cell_count_[cells]) {
-            ++statistics_.lookup_masks_tested;
-            const auto mask_entry = patterns_.find(indexed.mask);
-            if (mask_entry == patterns_.end()) {
-                throw std::logic_error("RZone ordered mask index is inconsistent");
-            }
-            const auto found = mask_entry->second.find(board.raw & indexed.nibble_mask);
-            if (found == mask_entry->second.end()) continue;
-            statistics_.lookup_candidates += found->second.size();
+        const RZoneCertificate* best = nullptr;
+        std::uint8_t best_transform = 0;
+        for (unsigned transform = 0; transform < transform_count; ++transform) {
+            for (const MaskIndexEntry& indexed : masks_by_cell_count_[cells]) {
+                ++statistics_.lookup_masks_tested;
+                const auto mask_entry = patterns_.find(indexed.mask);
+                if (mask_entry == patterns_.end()) {
+                    throw std::logic_error("RZone ordered mask index is inconsistent");
+                }
+                const auto found = mask_entry->second.find(
+                    candidates[transform].raw & indexed.nibble_mask);
+                if (found == mask_entry->second.end()) continue;
+                statistics_.lookup_candidates += found->second.size();
 
-            const RZoneCertificate* best = nullptr;
-            for (const RZoneCertificateId id : found->second) {
-                const RZoneCertificate* certificate = find(id);
-                if (!certificate || !certificate->validated || certificate->phase != phase ||
-                    certificate->winning_tile != winning_tile_) {
-                    continue;
-                }
-                ++statistics_.pattern_matches;
-                if (!best || certificate->depth < best->depth ||
-                    (certificate->depth == best->depth && certificate->id < best->id)) {
-                    best = certificate;
+                for (const RZoneCertificateId id : found->second) {
+                    const RZoneCertificate* certificate = find(id);
+                    if (!certificate || !certificate->validated || certificate->phase != phase ||
+                        certificate->winning_tile != winning_tile_) {
+                        continue;
+                    }
+                    ++statistics_.pattern_matches;
+                    if (!best || certificate->depth < best->depth ||
+                        (certificate->depth == best->depth && certificate->id < best->id) ||
+                        (certificate->depth == best->depth && certificate->id == best->id &&
+                         transform < best_transform)) {
+                        best = certificate;
+                        best_transform = static_cast<std::uint8_t>(transform);
+                    }
                 }
             }
-            if (best) {
-                ++statistics_.lookup_early_exits;
-                return recordLookupHit(best, phase);
-            }
+        }
+        if (best) {
+            ++statistics_.lookup_early_exits;
+            return recordLookupHit(best, phase, best_transform);
         }
     }
     return std::nullopt;

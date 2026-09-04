@@ -542,10 +542,16 @@ const RzProofEntry* RzProofTable::find(RZoneCertificateId id) const
     return &entries_[static_cast<std::size_t>(id - 1)];
 }
 
-bool RzProofTable::matches(const RzProofEntry& entry, Board board, Phase phase)
+bool RzProofTable::matches(
+    const RzProofEntry& entry,
+    Board board,
+    Phase phase,
+    std::uint8_t transform)
 {
+    if (transform >= 8) return false;
+    const Board candidate = transform == 0 ? board : transformBoard(board, transform);
     return entry.phase == phase &&
-           (board.raw & expandNibbleMask(entry.mask)) == entry.masked_board;
+           (candidate.raw & expandNibbleMask(entry.mask)) == entry.masked_board;
 }
 
 const RzProofEntry* RzProofTable::findMatching(

@@ -57,7 +57,8 @@ Solver::Solver(const Game& game, SolverOptions options, ProgressCallback progres
       rzone_table_(game,
                    options.winning_tile,
                    options.rzone_max_cells,
-                   options.rzone_lookup_policy)
+                   options.rzone_lookup_policy,
+                   options.use_rzone_symmetry)
 {
     if (options_.winning_tile < 2 || (options_.winning_tile & (options_.winning_tile - 1)) != 0) {
         throw std::invalid_argument("winning tile must be a power of two and at least 2");
@@ -95,13 +96,19 @@ SearchResult Solver::solve()
     return result;
 }
 
-void Solver::annotateRZone(TraceNode& trace, RZoneCertificateId id, bool hit)
+void Solver::annotateRZone(
+    TraceNode& trace,
+    RZoneCertificateId id,
+    bool hit,
+    std::uint8_t transform)
 {
     const RZoneCertificate* certificate = rzone_table_.find(id);
     if (!certificate || !certificate->validated) {
         throw std::logic_error("attempted to attach an invalid RZone certificate");
     }
     trace.rzone_hit = hit;
+    trace.rzone_symmetry_hit = transform != 0;
+    trace.rzone_transform = transform;
     trace.rzone_certificate_id = id;
     trace.rzone_kind = certificate->kind;
     trace.rzone_mask = certificate->mask;
@@ -130,16 +137,18 @@ void Solver::validateRZoneAgainstExact(Board board, Phase phase) const
 bool Solver::lookupRZone(Board board, Phase phase, TraceNode& trace)
 {
     if (options_.rzone_mode != RZoneMode::Lookup) return false;
-    const std::optional<RZoneCertificateId> id = rzone_table_.lookup(board, phase);
-    if (!id) return false;
+    const std::optional<RZoneMatch> match = rzone_table_.lookup(board, phase);
+    if (!match) return false;
     validateRZoneAgainstExact(board, phase);
     trace.outcome = Outcome::Win;
     trace.terminal_reason = TerminalReason::None;
     trace.solved_by = SolvedBy::RZoneTable;
-    annotateRZone(trace, *id, true);
-    const RZoneCertificate* certificate = rzone_table_.find(*id);
+    annotateRZone(trace, match->id, true, match->transform);
+    const RZoneCertificate* certificate = rzone_table_.find(match->id);
     if (phase == Phase::Player && certificate && certificate->slide) {
-        trace.selected_action = SearchAction::slide(*certificate->slide);
+        trace.selected_action = SearchAction::slide(transformDirection(
+            *certificate->slide,
+            inverseTransform(match->transform)));
     }
     return true;
 }
@@ -148,23 +157,31 @@ void Solver::liftPlayerRZone(
     Board board, Direction direction, const TraceNode& child, TraceNode& trace)
 {
     if (options_.rzone_mode == RZoneMode::Disabled || !child.rzone_certificate_id) return;
+    const std::uint8_t transform = child.rzone_transform.value_or(0);
+    const Board stored_parent = transform == 0 ? board : transformBoard(board, transform);
+    const Direction stored_direction = transformDirection(direction, transform);
     const std::optional<RZoneCertificateId> id =
-        rzone_table_.liftFixedSlide(board, direction, *child.rzone_certificate_id);
-    if (id) annotateRZone(trace, *id, false);
+        rzone_table_.liftFixedSlide(stored_parent, stored_direction, *child.rzone_certificate_id);
+    if (id) annotateRZone(trace, *id, false, transform);
 }
 
 void Solver::liftEnvironmentRZone(Board board, TraceNode& trace)
 {
     if (options_.rzone_mode == RZoneMode::Disabled) return;
     std::optional<RZoneCertificateId> best_id;
+    std::uint8_t best_transform = 0;
     unsigned best_cells = 17;
     unsigned best_depth = 0;
-    std::unordered_set<RZoneCertificateId> attempted;
+    std::unordered_set<std::uint64_t> attempted;
     for (const auto& child : trace.children) {
         if (!child->rzone_certificate_id) continue;
-        if (!attempted.insert(*child->rzone_certificate_id).second) continue;
+        const std::uint8_t transform = child->rzone_transform.value_or(0);
+        const std::uint64_t attempt_key =
+            (static_cast<std::uint64_t>(transform) << 32) | *child->rzone_certificate_id;
+        if (!attempted.insert(attempt_key).second) continue;
+        const Board stored_parent = transform == 0 ? board : transformBoard(board, transform);
         const std::optional<RZoneCertificateId> id =
-            rzone_table_.liftUniversalPlacement(board, *child->rzone_certificate_id);
+            rzone_table_.liftUniversalPlacement(stored_parent, *child->rzone_certificate_id);
         if (!id) continue;
         const RZoneCertificate* candidate = rzone_table_.find(*id);
         if (!candidate) continue;
@@ -172,13 +189,16 @@ void Solver::liftEnvironmentRZone(Board board, TraceNode& trace)
         if (!best_id || candidate_cells < best_cells ||
             (candidate_cells == best_cells && candidate->depth < best_depth) ||
             (candidate_cells == best_cells && candidate->depth == best_depth &&
-             candidate->id < *best_id)) {
+             candidate->id < *best_id) ||
+            (candidate_cells == best_cells && candidate->depth == best_depth &&
+             candidate->id == *best_id && transform < best_transform)) {
             best_id = candidate->id;
+            best_transform = transform;
             best_cells = candidate_cells;
             best_depth = candidate->depth;
         }
     }
-    if (best_id) annotateRZone(trace, *best_id, false);
+    if (best_id) annotateRZone(trace, *best_id, false, best_transform);
 }
 
 void Solver::assignTraceId(TraceNode& trace)

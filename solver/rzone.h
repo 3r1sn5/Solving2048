@@ -35,6 +35,12 @@ enum class RZoneLookupPolicy {
 using RZoneCertificateId = std::uint32_t;
 inline constexpr RZoneCertificateId kNoRZoneCertificate = 0;
 
+struct RZoneMatch {
+    RZoneCertificateId id = kNoRZoneCertificate;
+    // Current candidate orientation -> stored certificate orientation.
+    std::uint8_t transform = 0;
+};
+
 struct RZoneCertificate {
     RZoneCertificateId id = kNoRZoneCertificate;
     RZoneStepKind kind = RZoneStepKind::Terminal;
@@ -68,6 +74,9 @@ struct RZoneStatistics {
     std::uint64_t lookup_early_exits = 0;
     std::uint64_t player_hits = 0;
     std::uint64_t environment_hits = 0;
+    std::uint64_t exact_orientation_hits = 0;
+    std::uint64_t symmetry_hits = 0;
+    std::uint64_t lookup_transforms_tested = 0;
     std::uint64_t partial_hits = 0;
     std::uint64_t full_board_hits = 0;
 
@@ -79,7 +88,8 @@ public:
     RZoneTable(const Game& game,
                unsigned winning_tile,
                unsigned max_cells = 16,
-               RZoneLookupPolicy lookup_policy = RZoneLookupPolicy::FullScan);
+               RZoneLookupPolicy lookup_policy = RZoneLookupPolicy::FullScan,
+               bool use_symmetry = false);
 
     std::optional<RZoneCertificateId> createTerminal(Board board, Phase phase);
     std::optional<RZoneCertificateId> liftFixedSlide(
@@ -90,12 +100,13 @@ public:
         Board parent,
         RZoneCertificateId child);
 
-    std::optional<RZoneCertificateId> lookup(Board board, Phase phase);
+    std::optional<RZoneMatch> lookup(Board board, Phase phase);
     const RZoneCertificate* find(RZoneCertificateId id) const;
 
     const RZoneStatistics& statistics() const { return statistics_; }
     std::size_t size() const { return certificates_.size(); }
     unsigned winningTile() const { return winning_tile_; }
+    bool usesSymmetry() const { return use_symmetry_; }
 
     static std::uint64_t maskedBoard(Board board, std::uint16_t mask);
     static unsigned countCells(std::uint16_t mask);
@@ -121,17 +132,25 @@ private:
     const SlideResult* findSlide(
         const std::vector<SlideResult>& slides,
         Direction direction) const;
-    std::optional<RZoneCertificateId> lookupFullScan(Board board, Phase phase);
-    std::optional<RZoneCertificateId> lookupSmallestFirst(Board board, Phase phase);
-    std::optional<RZoneCertificateId> recordLookupHit(
-        const RZoneCertificate* certificate,
+    std::optional<RZoneMatch> lookupFullScan(
+        const std::array<Board, 8>& candidates,
+        unsigned transform_count,
         Phase phase);
+    std::optional<RZoneMatch> lookupSmallestFirst(
+        const std::array<Board, 8>& candidates,
+        unsigned transform_count,
+        Phase phase);
+    std::optional<RZoneMatch> recordLookupHit(
+        const RZoneCertificate* certificate,
+        Phase phase,
+        std::uint8_t transform);
     static std::uint64_t expandNibbleMask(std::uint16_t mask);
 
     const Game& game_;
     unsigned winning_tile_ = 0;
     unsigned max_cells_ = 16;
     RZoneLookupPolicy lookup_policy_ = RZoneLookupPolicy::FullScan;
+    bool use_symmetry_ = false;
     // IDs and returned references remain stable while later certificates are
     // appended; certificates are immutable after publication.
     std::deque<RZoneCertificate> certificates_;

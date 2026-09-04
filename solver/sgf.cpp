@@ -55,7 +55,12 @@ std::string nodeComment(const TraceNode& node, const SgfMetadata* metadata)
 
     if (node.rzone_certificate_id) {
         comment << "rzone_hit = " << (node.rzone_hit ? "true" : "false") << '\n'
+                << "rzone_symmetry_hit = "
+                << (node.rzone_symmetry_hit ? "true" : "false") << '\n'
                 << "rzone_certificate_id = " << *node.rzone_certificate_id << '\n';
+        const std::uint8_t transform = node.rzone_transform.value_or(0);
+        comment << "rzone_transform = " << static_cast<unsigned>(transform)
+                << ':' << symmetryTransformName(transform) << '\n';
         if (node.rzone_kind) {
             comment << "rzone_kind = " << rzoneStepKindName(*node.rzone_kind) << '\n';
         }
@@ -102,6 +107,8 @@ std::string nodeComment(const TraceNode& node, const SgfMetadata* metadata)
                 << '\n' << "rzone_mode = " << rzoneModeName(metadata->rzone_mode)
                 << '\n' << "rzone_lookup_policy = "
                 << rzoneLookupPolicyName(metadata->rzone_lookup_policy)
+                << '\n' << "rzone_symmetry = "
+                << (metadata->use_rzone_symmetry ? "enabled" : "disabled")
                 << '\n' << "rzone_max_cells = " << metadata->rzone_max_cells
                 << '\n' << "rzone_shadow_exact_check = "
                 << (metadata->rzone_shadow_exact_check ? "enabled" : "disabled")
@@ -178,6 +185,12 @@ std::string nodeComment(const TraceNode& node, const SgfMetadata* metadata)
                 << '\n' << "rzone_player_hits = " << metadata->statistics.rzone.player_hits
                 << '\n' << "rzone_environment_hits = "
                 << metadata->statistics.rzone.environment_hits
+                << '\n' << "rzone_exact_orientation_hits = "
+                << metadata->statistics.rzone.exact_orientation_hits
+                << '\n' << "rzone_symmetry_hits = "
+                << metadata->statistics.rzone.symmetry_hits
+                << '\n' << "rzone_lookup_transforms_tested = "
+                << metadata->statistics.rzone.lookup_transforms_tested
                 << '\n' << "rzone_partial_hits = " << metadata->statistics.rzone.partial_hits
                 << '\n' << "rzone_full_board_hits = "
                 << metadata->statistics.rzone.full_board_hits;

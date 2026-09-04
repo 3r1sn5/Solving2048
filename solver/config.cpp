@@ -204,6 +204,7 @@ SolverConfig loadSolverConfig(const std::filesystem::path& path)
         "tt_path",
         "rzone_mode",
         "rzone_lookup_policy",
+        "use_rzone_symmetry",
         "rzone_max_cells",
         "rzone_shadow_exact_check",
         "load_rz",
@@ -262,6 +263,8 @@ SolverConfig loadSolverConfig(const std::filesystem::path& path)
             result.rzone_mode = parseRZoneMode(value, path, line_number);
         } else if (key == "rzone_lookup_policy") {
             result.rzone_lookup_policy = parseRZoneLookupPolicy(value, path, line_number);
+        } else if (key == "use_rzone_symmetry") {
+            result.use_rzone_symmetry = parseBool(value, path, line_number, key);
         } else if (key == "rzone_max_cells") {
             const std::uint64_t parsed = parseUnsigned(value, path, line_number, key);
             if (parsed > std::numeric_limits<unsigned>::max()) {

@@ -91,6 +91,8 @@ CommandLine parseCommandLine(int argc, char** argv)
                              option == "--save-tt" || option == "--no-save-tt" ||
                              option == "--load-rz" || option == "--no-load-rz" ||
                              option == "--save-rz" || option == "--no-save-rz" ||
+                             option == "--rzone-symmetry" ||
+                             option == "--no-rzone-symmetry" ||
                              option == "--rzone-shadow-exact-check" ||
                              option == "--no-rzone-shadow-exact-check";
         if (!takes_value && !is_flag) throw std::invalid_argument("unknown option: " + option);
@@ -150,6 +152,10 @@ CommandLine parseCommandLine(int argc, char** argv)
         } else if (option == "--rzone-lookup-policy") {
             command.settings.rzone_lookup_policy =
                 parseRZoneLookupPolicyOption(nextValue());
+        } else if (option == "--rzone-symmetry") {
+            command.settings.use_rzone_symmetry = true;
+        } else if (option == "--no-rzone-symmetry") {
+            command.settings.use_rzone_symmetry = false;
         } else if (option == "--rzone-max-cells") {
             const std::uint64_t value = parseUnsigned(nextValue(), "--rzone-max-cells");
             if (value > 16) throw std::invalid_argument("--rzone-max-cells must be in [1, 16]");
@@ -198,6 +204,7 @@ void printHelp(const char* program)
         << "  --tt-file PATH          Override persistent TT file path\n"
         << "  --rzone-mode MODE      disabled, generate, or lookup\n"
         << "  --rzone-lookup-policy POLICY  full_scan or smallest_first\n"
+        << "  --rzone-symmetry / --no-rzone-symmetry  Search all 8 D4 orientations\n"
         << "  --rzone-max-cells N    Maximum cells in an RZone pattern (1..16)\n"
         << "  --load-rz / --no-load-rz  Load or skip the persistent RZone snapshot\n"
         << "  --save-rz / --no-save-rz  Save or skip the merged persistent RZone snapshot\n"
@@ -245,6 +252,7 @@ int main(int argc, char** argv)
         options.use_tt_symmetry = settings.use_tt_symmetry;
         options.rzone_mode = settings.rzone_mode;
         options.rzone_lookup_policy = settings.rzone_lookup_policy;
+        options.use_rzone_symmetry = settings.use_rzone_symmetry;
         options.rzone_max_cells = settings.rzone_max_cells;
         options.rzone_shadow_exact_check = settings.rzone_shadow_exact_check;
 
@@ -264,6 +272,8 @@ int main(int argc, char** argv)
                   << "RZone mode: " << rzoneModeName(settings.rzone_mode) << '\n'
                   << "RZone lookup policy: "
                   << rzoneLookupPolicyName(settings.rzone_lookup_policy) << '\n'
+                  << "RZone symmetry lookup: "
+                  << (settings.use_rzone_symmetry ? "enabled" : "disabled") << '\n'
                   << "RZone max cells: " << settings.rzone_max_cells << '\n'
                   << "persistent RZone load: "
                   << (settings.load_rz ? "enabled" : "disabled") << '\n'
@@ -365,6 +375,7 @@ int main(int argc, char** argv)
         metadata.use_tt_symmetry = settings.use_tt_symmetry;
         metadata.rzone_mode = settings.rzone_mode;
         metadata.rzone_lookup_policy = settings.rzone_lookup_policy;
+        metadata.use_rzone_symmetry = settings.use_rzone_symmetry;
         metadata.rzone_max_cells = settings.rzone_max_cells;
         metadata.rzone_shadow_exact_check = settings.rzone_shadow_exact_check;
         metadata.load_tt = settings.load_tt;
@@ -453,6 +464,9 @@ int main(int argc, char** argv)
                       << "RZone early exits: " << rzone.lookup_early_exits << '\n'
                       << "RZone player hits: " << rzone.player_hits << '\n'
                       << "RZone environment hits: " << rzone.environment_hits << '\n'
+                      << "RZone exact/symmetry hits: " << rzone.exact_orientation_hits << '/'
+                      << rzone.symmetry_hits << '\n'
+                      << "RZone transforms tested: " << rzone.lookup_transforms_tested << '\n'
                       << "RZone partial/full hits: " << rzone.partial_hits << '/'
                       << rzone.full_board_hits << '\n';
         }
