@@ -15,6 +15,7 @@ function makeNode(parent) {
     actionRaw: "",
     synthetic: false,
     syntheticLabel: "",
+    traceNodeId: 0,
   };
 }
 
@@ -134,6 +135,9 @@ function statusOf(node) {
 }
 
 function traceNodeIdOf(node) {
+  if (node && Number.isInteger(node.traceNodeId) && node.traceNodeId > 0) {
+    return String(node.traceNodeId);
+  }
   const value = commentValue(node, "node_id");
   return /^\d+$/.test(value) ? value : "";
 }
@@ -150,11 +154,11 @@ function ttSourceNodeIdOf(node) {
 }
 
 function isPersistentTtHit(node) {
-  return commentValue(node, "tt_source").toLowerCase() === "persistent";
+  return isTtHit(node) && !ttSourceNodeIdOf(node);
 }
 
 function ttReferenceLabel(node) {
-  if (isPersistentTtHit(node)) return `persistent ${commentValue(node, "tt_key") || "?"}`;
+  if (isPersistentTtHit(node)) return "persistent";
   const sourceId = ttSourceNodeIdOf(node);
   return `#${sourceId || "?"}`;
 }
@@ -169,7 +173,9 @@ function isTtHit(node) {
   if (!node || node.synthetic) return false;
   const flag = commentValue(node, "tt_hit").toLowerCase();
   const reason = commentValue(node, "terminal_reason").toUpperCase();
-  return flag === "true" || flag === "1" || reason === "TRANSPOSITION_TABLE" || Boolean(ttSourceNodeIdOf(node));
+  const solvedBy = commentValue(node, "solved_by").toUpperCase();
+  return solvedBy === "TT" || flag === "true" || flag === "1" ||
+    reason === "TRANSPOSITION_TABLE" || Boolean(ttSourceNodeIdOf(node));
 }
 
 function solvedByOf(node) {
@@ -184,6 +190,25 @@ function solvedByOf(node) {
   return "BACKPROPAGATION";
 }
 
+function wasExpanded(node) {
+  const explicit = commentValue(node, "expanded").toLowerCase();
+  if (explicit === "true" || explicit === "1") return true;
+  if (explicit === "false" || explicit === "0") return false;
+  const solvedBy = solvedByOf(node);
+  return solvedBy === "BACKPROPAGATION" ||
+    (solvedBy === "TERMINAL" && statusOf(node) === "LOSS");
+}
+
+function terminalReasonOf(node) {
+  const explicit = commentValue(node, "terminal_reason");
+  if (explicit) return explicit;
+  const solvedBy = solvedByOf(node);
+  if (solvedBy === "TT") return "TRANSPOSITION_TABLE";
+  if (solvedBy === "NODE_LIMIT") return "NODE_LIMIT";
+  if (solvedBy === "TERMINAL") return statusOf(node) === "WIN" ? "WINNING_TILE" : "NO_LEGAL_MOVE";
+  return "NONE";
+}
+
 function buildTraceNodeIndex(nodes) {
   const index = new Map();
   for (const node of nodes) {
@@ -191,6 +216,18 @@ function buildTraceNodeIndex(nodes) {
     if (id && !index.has(id)) index.set(id, node);
   }
   return index;
+}
+
+function assignImplicitTraceNodeIds(searchRoot) {
+  let nextId = 1;
+  const stack = [searchRoot];
+  while (stack.length) {
+    const node = stack.pop();
+    node.traceNodeId = nextId++;
+    for (let index = node.children.length - 1; index >= 0; index--) {
+      stack.push(node.children[index]);
+    }
+  }
 }
 
 function phaseOf(node, searchRoot) {
@@ -226,12 +263,14 @@ function incomingLabel(node, searchRoot) {
 function parseSkippedActions(node) {
   const source = commentValue(node, "children_skipped_actions");
   const specs = [];
-  const pattern = /([^,\s()]+)\s*\(\s*(-?\d+)\s*\)/g;
-  let match;
-  while ((match = pattern.exec(source)) !== null) {
-    const action = Number(match[2]);
+  for (const token of source.trim().split(/\s+/)) {
+    if (!token) continue;
+    const legacy = token.match(/^([^,\s()]+)\((-?\d+)\)$/);
+    const raw = legacy ? legacy[2] : token;
+    const action = Number(raw);
     if (!Number.isInteger(action) || action < 0 || action >= 36) continue;
-    specs.push({ label: match[1], action });
+    const player = action < 4 ? "B" : "W";
+    specs.push({ label: legacy ? legacy[1] : actionName(action, player), action });
   }
   return specs;
 }
@@ -261,10 +300,11 @@ function materializeSkippedNodes(root, allNodes) {
 }
 
 function findSearchRoot(sgfRoot) {
-  // Current solver SGFs mark the final runtime-configured opening node as the
-  // Player search root. Follow the opening sequence before scanning variations.
+  // Current solver SGFs put proof metadata only on the final opening node.
   let node = sgfRoot;
   while (node) {
+    if (commentValue(node, "solver_status") && commentValue(node, "winning_tile")) return node;
+    // Backward compatibility with SGFs that explicitly stored node_type.
     if (commentValue(node, "node_type").toUpperCase() === "PLAYER") return node;
     node = node.children.length === 1 ? node.children[0] : null;
   }
@@ -301,6 +341,21 @@ function relativeDepth(node, searchRoot) {
   let depth = 0;
   for (let current = node; current && current !== searchRoot; current = current.parent) depth++;
   return depth;
+}
+
+function siblingOrderOf(node, searchRoot) {
+  if (!node || node.synthetic) return "skipped";
+  if (node === searchRoot || !node.parent) return "0";
+  const siblings = node.parent.children.filter(child => !child.synthetic);
+  const index = siblings.indexOf(node);
+  return index >= 0 ? String(index) : "unknown";
+}
+
+function sumIntegerFields(node, first, second) {
+  const lhs = commentValue(node, first);
+  const rhs = commentValue(node, second);
+  if (!/^\d+$/.test(lhs) || !/^\d+$/.test(rhs)) return "";
+  return (BigInt(lhs) + BigInt(rhs)).toString();
 }
 
 function emptyBoard() {
@@ -468,6 +523,7 @@ function layoutVisibleTree(root, expandedNodes, showSkipped = true, options = {}
 function prepareSgf(text) {
   const parsed = parseSgf(text);
   const searchRoot = findSearchRoot(parsed.root);
+  assignImplicitTraceNodeIds(searchRoot);
   materializeSkippedNodes(parsed.root, parsed.nodes);
   const nodeByTraceId = buildTraceNodeIndex(parsed.nodes);
   return { ...parsed, searchRoot, nodeByTraceId };
@@ -853,11 +909,8 @@ function bootViewer() {
       group.appendChild(metaText);
 
       const tooltip = makeSvgElement("title");
-      const afterstateValue = commentValue(node, "afterstate_value") || commentValue(node, "v");
-      const actionValue = commentValue(node, "action_value") || afterstateValue;
-      const siblingOrder = node.synthetic ? "skipped" : commentValue(node, "dfs_order") || "unknown";
-      const transform = commentValue(node, "tt_transform");
-      tooltip.textContent = `${fullLabel}${traceId ? `\nnode id: ${traceId}` : ""}\nglobal DFS visit: ${node.synthetic ? "skipped" : visitOrder || "unknown"}\nsibling DFS order: ${siblingOrder}\n${phase} / ${phase === "PLAYER" ? "OR" : "AND"}\nstatus: ${status}\nsolved by: ${solvedByOf(node)}\ndepth: ${relativeDepth(node, state.searchRoot)}${ttHit ? `\n${symmetryTtHit ? "SYMMETRY " : ""}TT HIT -> ${ttReferenceLabel(node)}${transform ? `\ntransform: ${transform}` : ""}` : ""}${actionValue ? `\naction value: ${actionValue}` : ""}`;
+      const siblingOrder = siblingOrderOf(node, state.searchRoot);
+      tooltip.textContent = `${fullLabel}${traceId ? `\nimplicit node id: ${traceId}` : ""}\nglobal DFS visit: ${node.synthetic ? "skipped" : visitOrder || "unknown"}\nsibling DFS order: ${siblingOrder}\n${phase} / ${phase === "PLAYER" ? "OR" : "AND"}\nstatus: ${status}\nsolved by: ${solvedByOf(node)}\ndepth: ${relativeDepth(node, state.searchRoot)}${ttHit ? `\n${symmetryTtHit ? "SYMMETRY " : ""}TT HIT -> ${ttReferenceLabel(node)}` : ""}`;
       group.appendChild(tooltip);
 
       if (entry.hasChildren) {
@@ -980,40 +1033,34 @@ function bootViewer() {
     elements.metrics.innerHTML = "";
     const phase = phaseOf(selected, state.searchRoot);
     const status = statusOf(selected);
-    const stats = {
-      total: commentValue(selected, "children_total"),
-      expanded: commentValue(selected, "children_expanded"),
-      skipped: commentValue(selected, "children_skipped"),
-    };
     const nonSyntheticChildren = selected.children.filter(child => !child.synthetic).length;
+    const expandedChildren = selected.children.filter(child =>
+      !child.synthetic && wasExpanded(child)).length;
     const syntheticChildren = selected.children.filter(child => child.synthetic).length;
     const ttHit = isTtHit(selected);
     const symmetryTtHit = isSymmetryTtHit(selected);
     const globalVisit = dfsVisitOrderOf(selected);
     const values = [
       ["Incoming action", incomingLabel(selected, state.searchRoot)],
-      ["Node ID", traceNodeIdOf(selected)],
+      ["Implicit node ID", traceNodeIdOf(selected)],
       ["Global DFS visit", selected.synthetic ? "SKIPPED" : globalVisit ? `#${globalVisit}` : "unknown"],
-      ["Sibling DFS order", selected.synthetic ? "SKIPPED" : commentValue(selected, "dfs_order")],
+      ["Sibling DFS order", siblingOrderOf(selected, state.searchRoot)],
       ["DFS depth", String(relativeDepth(selected, state.searchRoot))],
       ["Node type", `${phase} / ${phase === "PLAYER" ? "OR" : "AND"}`],
       ["Result", status],
       ["Solved by", solvedByOf(selected)],
       ["TT reference", ttHit ? `HIT → ${ttReferenceLabel(selected)}` : "no"],
-      ["TT symmetry hit", ttHit ? (symmetryTtHit ? "yes" : "no") : "—"],
-      ["TT transform", ttHit ? commentValue(selected, "tt_transform") : ""],
+      ["TT symmetry hit", ttHit && commentValue(selected, "tt_symmetry_hit")
+        ? (symmetryTtHit ? "yes" : "no") : "—"],
       ["RZone certificate", commentValue(selected, "rzone_certificate_id")],
       ["RZone symmetry hit", commentValue(selected, "rzone_certificate_id")
-        ? commentValue(selected, "rzone_symmetry_hit") : "—"],
+        ? (Number.parseInt(commentValue(selected, "rzone_transform") || "0", 10) !== 0
+          ? "yes" : "no") : "—"],
       ["RZone transform", commentValue(selected, "rzone_transform")],
-      ["Reward", commentValue(selected, "reward")],
-      ["V(afterstate)", commentValue(selected, "afterstate_value") || commentValue(selected, "v")],
-      ["Reward + V", commentValue(selected, "action_value")],
-      ["Selected action value", commentValue(selected, "selected_action_value") || commentValue(selected, "selected_value")],
-      ["Children total", stats.total || String(nonSyntheticChildren + syntheticChildren)],
-      ["Expanded", stats.expanded || String(nonSyntheticChildren)],
-      ["Skipped", stats.skipped || String(syntheticChildren)],
-      ["Terminal", commentValue(selected, "terminal_reason") || "NONE"],
+      ["Children total", String(nonSyntheticChildren + syntheticChildren)],
+      ["Expanded", String(expandedChildren)],
+      ["Skipped", String(syntheticChildren)],
+      ["Terminal", terminalReasonOf(selected)],
     ];
     if (selected === state.searchRoot) {
       values.push(
@@ -1029,8 +1076,12 @@ function bootViewer() {
         ["Environment TT loaded", commentValue(selected, "environment_tt_loaded_entries")],
         ["Player TT new", commentValue(selected, "player_tt_new_entries")],
         ["Environment TT new", commentValue(selected, "environment_tt_new_entries")],
-        ["Player TT entries", commentValue(selected, "player_tt_entries")],
-        ["Environment TT entries", commentValue(selected, "environment_tt_entries")],
+        ["Player TT entries", sumIntegerFields(
+          selected, "player_tt_loaded_entries", "player_tt_new_entries") ||
+          commentValue(selected, "player_tt_entries")],
+        ["Environment TT entries", sumIntegerFields(
+          selected, "environment_tt_loaded_entries", "environment_tt_new_entries") ||
+          commentValue(selected, "environment_tt_entries")],
         ["RZone symmetry mode", commentValue(selected, "rzone_symmetry")],
         ["RZone exact hits", commentValue(selected, "rzone_exact_orientation_hits")],
         ["RZone symmetry hits", commentValue(selected, "rzone_symmetry_hits")],
@@ -1062,13 +1113,11 @@ function bootViewer() {
 
       const value = document.createElement("span");
       value.className = "child-value";
-      const afterstateValue = commentValue(child, "afterstate_value") || commentValue(child, "v");
-      const actionValue = commentValue(child, "action_value") || afterstateValue;
       value.textContent = child.synthetic
         ? "not searched"
         : ttHit
           ? `TT → ${ttReferenceLabel(child)}`
-          : `Q ${actionValue || "—"}`;
+          : solvedByOf(child);
 
       const phase = phaseOf(child, state.searchRoot);
       const phaseBadge = document.createElement("span");
@@ -1105,7 +1154,7 @@ function bootViewer() {
     elements.ttReference.className = `tt-reference${sourceNode ? "" : " unresolved"}`;
     elements.ttReference.setAttribute("aria-disabled", String(!sourceNode));
     elements.ttReference.title = persistentTtHit
-      ? `Persistent transposition table entry ${commentValue(selected, "tt_key") || "?"}`
+      ? "Persistent transposition table entry"
       : sourceNode
       ? `跳到 ${symmetryTtHit ? "symmetry " : ""}transposition table source node #${sourceId}`
       : `TT source node #${sourceId || "?"} 不在此 SGF tree 中`;

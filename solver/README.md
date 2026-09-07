@@ -182,8 +182,9 @@ of the candidate board and searches the existing one-copy index. The returned
 transform maps the current board into the stored certificate orientation;
 Player slide witnesses are mapped back before use. Parent lifting is performed
 in that same stored orientation, so `.rz` v1 needs no new edge field and lookup
-still performs no certificate replay. The SGF records `rzone_symmetry_hit` and
-`rzone_transform`, which the proof checker independently validates. Use
+still performs no certificate replay. The SGF records the certificate ID and
+numeric `rzone_transform`; a nonzero transform identifies a symmetry hit and is
+independently validated by the proof checker. Use
 `--no-rzone-symmetry` for the exact-orientation baseline.
 
 This first version stores only Player-view Win proofs. Exact TT remains the
@@ -261,8 +262,12 @@ The SGF records every visited DFS child. Actions not called because an AND/OR
 node already had a decisive result are recorded separately as `Skipped`.
 With TT enabled, a repeated state is recorded as a `TRANSPOSITION_TABLE`
 reference leaf rather than duplicating its proven subtree. A trace-local hit
-uses `tt_source_node_id`; a persistent hit uses `tt_source=persistent`,
-`tt_phase`, and `tt_key`, because a previous process's trace ID is not valid.
+uses `tt_source_node_id`; a persistent hit omits that run-local reference.
+Node IDs are implicit DFS-preorder positions. The checker reconstructs the
+phase, board, canonical TT key, transform, terminal reason, child count, and
+slide reward instead of storing those values in every SGF node. RZone nodes
+retain only their certificate ID and transform; the remaining certificate
+data comes from the bound `.rz` file.
 
 ## Viewer
 

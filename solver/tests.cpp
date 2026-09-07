@@ -1914,11 +1914,13 @@ void testRealGameApiAndThreeNodeSearch()
 
     TemporaryTtFile corrupt_trace;
     std::string corrupt_sgf = readFile(proof_sgf.path);
-    const std::string valid_order = "dfs_visit_order = 2";
-    const std::size_t order_position = corrupt_sgf.find(valid_order);
-    check(order_position != std::string::npos,
-          "target-8 proof SGF lacks the expected second DFS visit");
-    corrupt_sgf.replace(order_position, valid_order.size(), "dfs_visit_order = 9");
+    const std::string source_prefix = "tt_source_node_id = ";
+    const std::size_t source_position = corrupt_sgf.find(source_prefix);
+    check(source_position != std::string::npos,
+          "target-8 proof SGF lacks a trace-local TT source reference");
+    const std::size_t source_value = source_position + source_prefix.size();
+    const std::size_t source_end = corrupt_sgf.find_first_not_of("0123456789", source_value);
+    corrupt_sgf.replace(source_value, source_end - source_value, "999999999");
     {
         std::ofstream output(corrupt_trace.path, std::ios::out | std::ios::binary | std::ios::trunc);
         output << corrupt_sgf;
@@ -1926,7 +1928,7 @@ void testRealGameApiAndThreeNodeSearch()
     }
     checkThrows(
         [&] { (void)solver2048::verifySgfTrace(corrupt_trace.path, proof_manifest, proof_table); },
-        "complete SGF trace audit must reject a corrupt DFS visit order");
+        "complete SGF trace audit must reject a TT reference to a non-earlier preorder node");
 
     ProofManifest wrong_claim = proof_manifest;
     wrong_claim.root_outcome = Outcome::Loss;
@@ -1988,18 +1990,20 @@ void testRealGameApiAndThreeNodeSearch()
 
     TemporaryTtFile wrong_rzone_transform_trace;
     std::string wrong_rzone_transform_sgf = readFile(rzone_proof_sgf.path);
-    const std::size_t symmetry_hit_field =
-        wrong_rzone_transform_sgf.find("rzone_symmetry_hit = true");
-    const std::size_t transform_field = wrong_rzone_transform_sgf.find(
-        "rzone_transform = ", symmetry_hit_field);
-    check(symmetry_hit_field != std::string::npos && transform_field != std::string::npos,
+    std::size_t transform_field = std::string::npos;
+    for (unsigned transform = 1; transform < 8 && transform_field == std::string::npos;
+         ++transform) {
+        transform_field = wrong_rzone_transform_sgf.find(
+            "rzone_transform = " + std::to_string(transform));
+    }
+    check(transform_field != std::string::npos,
           "symmetry RZone proof SGF lacks a transformed certificate annotation");
     const std::size_t transform_value =
         transform_field + std::string("rzone_transform = ").size();
     const std::size_t transform_end =
         wrong_rzone_transform_sgf.find('\n', transform_value);
     wrong_rzone_transform_sgf.replace(
-        transform_value, transform_end - transform_value, "0:identity");
+        transform_value, transform_end - transform_value, "0");
     {
         std::ofstream output(
             wrong_rzone_transform_trace.path,
@@ -2272,43 +2276,24 @@ void testSgfActionEncodingEscapingAndOrder()
           "SGF root metadata did not escape a closing bracket");
     check(sgf.find("model = path\\\\model") != std::string::npos,
           "SGF root metadata did not escape a backslash");
-    check(sgf.find("children_skipped_actions = left(3) up(0)") != std::string::npos,
+    check(sgf.find("children_skipped_actions = 3 0") != std::string::npos,
           "SGF must preserve skipped action order");
-    check(sgf.find("config_file = solver/test.cfg") != std::string::npos &&
-              sgf.find("fixed_opening = 4@2,2@15") != std::string::npos,
-          "SGF metadata must preserve cfg path and runtime fixed opening");
-    check(sgf.find("reward = 4") != std::string::npos &&
-              sgf.find("afterstate_value = 38.5") != std::string::npos &&
-              sgf.find("action_value = 42.5") != std::string::npos,
-          "SGF must distinguish slide reward, V(afterstate), and their action value sum");
-
+    check(sgf.find("config_file = solver/test.cfg") != std::string::npos,
+          "SGF metadata must preserve the cfg path");
     const std::vector<std::string> solved_by = parseCommentFields(sgf, "solved_by");
     check(solved_by == std::vector<std::string>(
                            {"BACKPROPAGATION", "BACKPROPAGATION", "TERMINAL", "TT"}),
           "SGF solved_by fields must preserve each node's resolution source");
 
-    const std::vector<std::uint64_t> visit_orders =
-        parseUnsignedCommentFields(sgf, "dfs_visit_order");
-    check(visit_orders == std::vector<std::uint64_t>({1, 2, 3, 4}),
-          "every SGF node must expose its unique, continuous DFS visit order");
-    const std::vector<std::uint64_t> node_ids = parseUnsignedCommentFields(sgf, "node_id");
-    check(node_ids == visit_orders,
-          "SGF node_id and dfs_visit_order must identify the same discovery sequence");
     const std::vector<std::uint64_t> tt_sources =
         parseUnsignedCommentFields(sgf, "tt_source_node_id");
     check(tt_sources == std::vector<std::uint64_t>({2}),
           "SGF TT hit must contain one parseable source-node reference");
-    check(sgf.find("tt_symmetry_hit = true") != std::string::npos &&
-              sgf.find("tt_transform = 3:rotate270") != std::string::npos &&
-              sgf.find("tt_symmetry = enabled") != std::string::npos,
-          "SGF must expose symmetry TT mode, hit classification, and transform");
-    check(sgf.find("tt_source = trace") != std::string::npos &&
-              sgf.find("tt_phase = ENVIRONMENT") != std::string::npos &&
-              sgf.find("tt_key = 0x0000000000001234") != std::string::npos &&
+    check(sgf.find("tt_symmetry = enabled") != std::string::npos &&
               sgf.find("persistent_tt_load = enabled") != std::string::npos &&
               sgf.find("persistent_tt_save = enabled") != std::string::npos &&
               sgf.find("tt_file = solver/tt/test.tt") != std::string::npos,
-          "SGF must expose TT phase/key/source and persistent snapshot settings");
+          "SGF must expose TT mode and persistent snapshot settings");
     check(sgf.find("rzone_mode = lookup") != std::string::npos &&
               sgf.find("rzone_lookup_policy = smallest_first") != std::string::npos &&
               sgf.find("rzone_symmetry = enabled") != std::string::npos &&
@@ -2323,19 +2308,41 @@ void testSgfActionEncodingEscapingAndOrder()
               sgf.find("rz_prefix_record_count = 7") != std::string::npos &&
               sgf.find("rz_prefix_checksum = 0x123456789abcdef0") != std::string::npos &&
               sgf.find("rzone_certificate_id = 7") != std::string::npos &&
-              sgf.find("rzone_symmetry_hit = false") != std::string::npos &&
-              sgf.find("rzone_transform = 0:identity") != std::string::npos &&
-              sgf.find("rzone_kind = FIXED_SLIDE") != std::string::npos &&
-              sgf.find("rzone_mask = 0x0007") != std::string::npos,
+              sgf.find("rzone_transform = 0\n") != std::string::npos,
           "SGF must expose RZone configuration, counters, and node certificate metadata");
 
-    const std::size_t source_visit_position = sgf.find("dfs_visit_order = 2");
-    const std::size_t hit_visit_position = sgf.find("dfs_visit_order = 4");
-    const std::size_t reference_position = sgf.find("tt_source_node_id = 2", hit_visit_position);
-    check(source_visit_position != std::string::npos && hit_visit_position != std::string::npos &&
-              reference_position != std::string::npos && source_visit_position < hit_visit_position &&
-              hit_visit_position < reference_position && tt_sources[0] < visit_orders.back(),
-          "SGF TT source must be emitted before the later hit that references it");
+    check(sgf.find("dfs_visit_order") == std::string::npos &&
+              sgf.find("dfs_order") == std::string::npos &&
+              sgf.find("node_type") == std::string::npos &&
+              sgf.find("children_visited") == std::string::npos &&
+              sgf.find("children_expanded") == std::string::npos &&
+              sgf.find("children_skipped =") == std::string::npos &&
+              sgf.find("tt_hit =") == std::string::npos &&
+              sgf.find("tt_source =") == std::string::npos &&
+              sgf.find("tt_phase") == std::string::npos &&
+              sgf.find("rzone_hit =") == std::string::npos &&
+              sgf.find("rzone_symmetry_hit =") == std::string::npos &&
+              sgf.find("fixed_opening") == std::string::npos &&
+              sgf.find("player_tt_exact_hits") == std::string::npos &&
+              sgf.find("environment_tt_exact_hits") == std::string::npos &&
+              sgf.find("player_tt_entries =") == std::string::npos &&
+              sgf.find("environment_tt_entries =") == std::string::npos &&
+              sgf.find("\nnode_id =") == std::string::npos &&
+              sgf.find("expanded =") == std::string::npos &&
+              sgf.find("children_total =") == std::string::npos &&
+              sgf.find("terminal_reason =") == std::string::npos &&
+              sgf.find("reward =") == std::string::npos &&
+              sgf.find("afterstate_value =") == std::string::npos &&
+              sgf.find("action_value =") == std::string::npos &&
+              sgf.find("selected_action_value =") == std::string::npos &&
+              sgf.find("tt_key =") == std::string::npos &&
+              sgf.find("tt_symmetry_hit =") == std::string::npos &&
+              sgf.find("tt_transform =") == std::string::npos &&
+              sgf.find("rzone_kind =") == std::string::npos &&
+              sgf.find("rzone_mask =") == std::string::npos &&
+              sgf.find("rzone_masked_board =") == std::string::npos &&
+              sgf.find("rzone_depth =") == std::string::npos,
+          "SGF must omit fields that are exactly reconstructible from retained data");
 
     const std::size_t down_position = sgf.find("(;B[2]");
     const std::size_t nested_placement_position = sgf.find("(;W[4]", down_position);
@@ -2345,6 +2352,10 @@ void testSgfActionEncodingEscapingAndOrder()
           "SGF is missing an expected action node");
     check(down_position < nested_placement_position && nested_placement_position < right_position,
           "SGF writer must preserve DFS child and nested placement order");
+    const std::size_t reference_position = sgf.find("tt_source_node_id = 2", right_position);
+    check(reference_position != std::string::npos && down_position < right_position &&
+              right_position < reference_position,
+          "SGF TT source ID must refer to the earlier implicit preorder node");
     check(sgf.size() >= 2 && sgf.substr(sgf.size() - 2) == ")\n",
           "SGF output must close the game tree and end with a newline");
     check(!std::filesystem::exists(temporary.path.string() + ".tmp"),

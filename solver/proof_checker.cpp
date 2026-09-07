@@ -378,15 +378,6 @@ bool parseEnabled(const std::string& text,
     fileFail(path, "SGF field " + field + " must be enabled or disabled");
 }
 
-bool parseBoolean(const std::string& text,
-                  const std::string& field,
-                  const std::filesystem::path& path)
-{
-    if (text == "true") return true;
-    if (text == "false") return false;
-    fileFail(path, "SGF field " + field + " must be true or false");
-}
-
 SolvedBy parseSolvedBy(const std::string& text, const std::filesystem::path& path)
 {
     if (text == "NONE") return SolvedBy::None;
@@ -396,25 +387,6 @@ SolvedBy parseSolvedBy(const std::string& text, const std::filesystem::path& pat
     if (text == "BACKPROPAGATION") return SolvedBy::Backpropagation;
     if (text == "NODE_LIMIT") return SolvedBy::NodeLimit;
     fileFail(path, "invalid solved_by: " + text);
-}
-
-RZoneStepKind parseRZoneKind(const std::string& text, const std::filesystem::path& path)
-{
-    if (text == "TERMINAL") return RZoneStepKind::Terminal;
-    if (text == "FIXED_SLIDE") return RZoneStepKind::FixedSlide;
-    if (text == "UNIVERSAL_PLACEMENT") return RZoneStepKind::UniversalPlacement;
-    fileFail(path, "invalid rzone_kind: " + text);
-}
-
-TerminalReason parseTerminalReason(const std::string& text,
-                                   const std::filesystem::path& path)
-{
-    if (text == "NONE") return TerminalReason::None;
-    if (text == "WINNING_TILE") return TerminalReason::WinningTile;
-    if (text == "NO_LEGAL_MOVE") return TerminalReason::NoLegalMove;
-    if (text == "NODE_LIMIT") return TerminalReason::NodeLimit;
-    if (text == "TRANSPOSITION_TABLE") return TerminalReason::TranspositionTable;
-    fileFail(path, "invalid terminal_reason: " + text);
 }
 
 SearchAction actionFromId(unsigned id, const std::filesystem::path& path)
@@ -453,7 +425,10 @@ SearchAction parseActionToken(const std::string& text,
                               const std::filesystem::path& path)
 {
     const std::size_t open = text.rfind('(');
-    if (open == std::string::npos || text.empty() || text.back() != ')' || open + 1 == text.size() - 1) {
+    if (open == std::string::npos) {
+        return actionFromId(parseUnsigned<unsigned>(text, field, path), path);
+    }
+    if (text.empty() || text.back() != ')' || open + 1 == text.size() - 1) {
         fileFail(path, "SGF field " + field + " has an invalid action token: " + text);
     }
     const unsigned id = parseUnsigned<unsigned>(
@@ -480,63 +455,23 @@ std::vector<SearchAction> parseActionList(const std::string& text,
 struct TraceRecord {
     Outcome outcome = Outcome::Unknown;
     SolvedBy solved_by = SolvedBy::None;
-    TerminalReason terminal_reason = TerminalReason::None;
     Phase phase = Phase::Player;
-    bool expanded = false;
-    std::uint64_t node_id = 0;
-    std::uint64_t dfs_visit_order = 0;
-    std::uint64_t dfs_order = 0;
-    std::uint64_t children_total = 0;
-    std::uint64_t children_visited = 0;
-    std::uint64_t children_expanded = 0;
-    std::uint64_t children_skipped = 0;
-    bool tt_hit = false;
-    std::optional<std::string> tt_source;
-    std::optional<Phase> tt_phase;
-    std::optional<std::uint64_t> tt_key;
     std::optional<std::uint64_t> tt_source_node_id;
-    std::optional<std::uint8_t> tt_transform;
-    std::optional<bool> rzone_hit;
-    std::optional<bool> rzone_symmetry_hit;
     std::optional<std::uint8_t> rzone_transform;
     std::optional<RZoneCertificateId> rzone_certificate_id;
-    std::optional<RZoneStepKind> rzone_kind;
-    std::optional<std::uint16_t> rzone_mask;
-    std::optional<std::uint64_t> rzone_masked_board;
-    std::optional<std::uint32_t> rzone_depth;
     std::optional<SearchAction> selected_action;
     std::vector<SearchAction> skipped_actions;
-    std::optional<int> reward;
 };
 
 TraceRecord parseTraceRecord(const Properties& properties,
-                             const std::filesystem::path& path)
+                             const std::filesystem::path& path,
+                             Phase phase)
 {
     const auto fields = parseCommentFields(singleProperty(properties, "C", path), path);
     TraceRecord record;
     record.outcome = parseOutcome(requiredField(fields, "solver_status", path), path);
     record.solved_by = parseSolvedBy(requiredField(fields, "solved_by", path), path);
-    record.terminal_reason = parseTerminalReason(
-        requiredField(fields, "terminal_reason", path), path);
-    const std::string& phase = requiredField(fields, "node_type", path);
-    if (phase == "PLAYER") record.phase = Phase::Player;
-    else if (phase == "ENVIRONMENT") record.phase = Phase::Environment;
-    else fileFail(path, "invalid node_type: " + phase);
-    record.expanded = parseBoolean(requiredField(fields, "expanded", path), "expanded", path);
-    record.node_id = parseUnsigned<std::uint64_t>(
-        requiredField(fields, "node_id", path), "node_id", path);
-    record.dfs_visit_order = parseUnsigned<std::uint64_t>(
-        requiredField(fields, "dfs_visit_order", path), "dfs_visit_order", path);
-    record.dfs_order = parseUnsigned<std::uint64_t>(
-        requiredField(fields, "dfs_order", path), "dfs_order", path);
-    record.children_total = parseUnsigned<std::uint64_t>(
-        requiredField(fields, "children_total", path), "children_total", path);
-    record.children_visited = parseUnsigned<std::uint64_t>(
-        requiredField(fields, "children_visited", path), "children_visited", path);
-    record.children_expanded = parseUnsigned<std::uint64_t>(
-        requiredField(fields, "children_expanded", path), "children_expanded", path);
-    record.children_skipped = parseUnsigned<std::uint64_t>(
-        requiredField(fields, "children_skipped", path), "children_skipped", path);
+    record.phase = phase;
 
     const auto selected = fields.find("selected_action");
     if (selected != fields.end()) {
@@ -547,56 +482,10 @@ TraceRecord parseTraceRecord(const Properties& properties,
         record.skipped_actions = parseActionList(
             skipped->second, "children_skipped_actions", path);
     }
-    const auto reward = fields.find("reward");
-    if (reward != fields.end()) {
-        int value = 0;
-        const std::string_view text = reward->second;
-        const auto parsed = std::from_chars(text.data(), text.data() + text.size(), value);
-        if (text.empty() || parsed.ec != std::errc{} || parsed.ptr != text.data() + text.size()) {
-            fileFail(path, "SGF field reward is not a valid integer: " + reward->second);
-        }
-        record.reward = value;
-    }
-
-    const auto tt_hit = fields.find("tt_hit");
-    if (tt_hit != fields.end()) record.tt_hit = parseBoolean(tt_hit->second, "tt_hit", path);
-    const auto tt_source = fields.find("tt_source");
-    if (tt_source != fields.end()) record.tt_source = tt_source->second;
-    const auto tt_phase = fields.find("tt_phase");
-    if (tt_phase != fields.end()) {
-        if (tt_phase->second == "PLAYER") record.tt_phase = Phase::Player;
-        else if (tt_phase->second == "ENVIRONMENT") record.tt_phase = Phase::Environment;
-        else fileFail(path, "invalid tt_phase: " + tt_phase->second);
-    }
-    const auto tt_key = fields.find("tt_key");
-    if (tt_key != fields.end()) {
-        record.tt_key = parseUnsigned<std::uint64_t>(tt_key->second, "tt_key", path);
-    }
     const auto source = fields.find("tt_source_node_id");
     if (source != fields.end()) {
         record.tt_source_node_id = parseUnsigned<std::uint64_t>(
             source->second, "tt_source_node_id", path);
-    }
-    const auto transform = fields.find("tt_transform");
-    if (transform != fields.end()) {
-        const std::size_t colon = transform->second.find(':');
-        const std::string number = transform->second.substr(0, colon);
-        const unsigned value = parseUnsigned<unsigned>(number, "tt_transform", path);
-        if (value >= 8) fileFail(path, "SGF tt_transform must be in [0, 7]");
-        record.tt_transform = static_cast<std::uint8_t>(value);
-        if (colon != std::string::npos &&
-            transform->second.substr(colon + 1) != symmetryTransformName(record.tt_transform.value())) {
-            fileFail(path, "SGF tt_transform number and name disagree");
-        }
-    }
-    const auto rzone_hit = fields.find("rzone_hit");
-    if (rzone_hit != fields.end()) {
-        record.rzone_hit = parseBoolean(rzone_hit->second, "rzone_hit", path);
-    }
-    const auto rzone_symmetry_hit = fields.find("rzone_symmetry_hit");
-    if (rzone_symmetry_hit != fields.end()) {
-        record.rzone_symmetry_hit = parseBoolean(
-            rzone_symmetry_hit->second, "rzone_symmetry_hit", path);
     }
     const auto rzone_transform = fields.find("rzone_transform");
     if (rzone_transform != fields.end()) {
@@ -615,25 +504,6 @@ TraceRecord parseTraceRecord(const Properties& properties,
     if (rzone_certificate_id != fields.end()) {
         record.rzone_certificate_id = parseUnsigned<RZoneCertificateId>(
             rzone_certificate_id->second, "rzone_certificate_id", path);
-    }
-    const auto rzone_kind = fields.find("rzone_kind");
-    if (rzone_kind != fields.end()) {
-        record.rzone_kind = parseRZoneKind(rzone_kind->second, path);
-    }
-    const auto rzone_mask = fields.find("rzone_mask");
-    if (rzone_mask != fields.end()) {
-        record.rzone_mask = parseUnsigned<std::uint16_t>(
-            rzone_mask->second, "rzone_mask", path);
-    }
-    const auto rzone_masked_board = fields.find("rzone_masked_board");
-    if (rzone_masked_board != fields.end()) {
-        record.rzone_masked_board = parseUnsigned<std::uint64_t>(
-            rzone_masked_board->second, "rzone_masked_board", path);
-    }
-    const auto rzone_depth = fields.find("rzone_depth");
-    if (rzone_depth != fields.end()) {
-        record.rzone_depth = parseUnsigned<std::uint32_t>(
-            rzone_depth->second, "rzone_depth", path);
     }
     return record;
 }
@@ -846,12 +716,10 @@ private:
 struct TraceChildSummary {
     SearchAction action;
     Outcome outcome = Outcome::Unknown;
-    bool expanded = false;
 };
 
 struct TraceNodeSummary {
     Outcome outcome = Outcome::Unknown;
-    bool expanded = false;
 };
 
 class TraceVerifier {
@@ -871,8 +739,7 @@ public:
 
     TraceVerificationStatistics verify(const Properties& root_properties)
     {
-        const TraceRecord root = parseTraceRecord(root_properties, path_);
-        if (root.dfs_order != 0) fail(manifest_.root_board, Phase::Player, "root dfs_order must be zero");
+        const TraceRecord root = parseTraceRecord(root_properties, path_, Phase::Player);
         const TraceNodeSummary summary = verifyNode(manifest_.root_board, root, 0);
         if (summary.outcome != manifest_.root_outcome) {
             fail(manifest_.root_board, Phase::Player,
@@ -910,8 +777,7 @@ private:
 
     Board replayAction(Board parent,
                        Phase parent_phase,
-                       const SearchAction& action,
-                       std::optional<int>& expected_reward)
+                       const SearchAction& action)
     {
         if (parent_phase == Phase::Player) {
             const std::vector<SlideResult> slides = generateLegalSlides(parent);
@@ -919,7 +785,6 @@ private:
                 return slide.direction == action.direction;
             });
             if (found == slides.end()) fail(parent, parent_phase, "SGF contains an illegal slide action");
-            expected_reward = found->reward;
             return found->afterstate;
         }
         const std::vector<PlacementResult> placements = generateLegalPlacements(parent);
@@ -930,46 +795,29 @@ private:
         if (found == placements.end()) {
             fail(parent, parent_phase, "SGF contains an illegal placement action");
         }
-        expected_reward.reset();
         return found->board;
     }
 
     TraceChildSummary verifyVariation(Board parent,
                                       Phase parent_phase,
-                                      std::uint64_t sibling_order,
                                       std::uint64_t depth)
     {
         parser_.expect('(');
         const Properties properties = parser_.readNode();
         const SearchAction action = readIncomingAction(properties, parent_phase);
-        std::optional<int> expected_reward;
-        const Board board = replayAction(parent, parent_phase, action, expected_reward);
+        const Board board = replayAction(parent, parent_phase, action);
         ++statistics_.actions_replayed;
 
-        const TraceRecord record = parseTraceRecord(properties, path_);
         const Phase expected_phase = parent_phase == Phase::Player
             ? Phase::Environment
             : Phase::Player;
-        if (record.phase != expected_phase) {
-            fail(board, record.phase, "child node_type does not alternate with its parent");
-        }
-        if (record.dfs_order != sibling_order) {
-            fail(board, record.phase, "dfs_order is not the visited sibling order");
-        }
-        if (parent_phase == Phase::Player) {
-            if (!record.reward || *record.reward != *expected_reward) {
-                fail(board, record.phase, "slide reward does not match independent replay");
-            }
-        } else if (record.reward) {
-            fail(board, record.phase, "placement child must not contain a reward");
-        }
-
+        const TraceRecord record = parseTraceRecord(properties, path_, expected_phase);
         const TraceNodeSummary child = verifyNode(board, record, depth);
         if (parser_.peekSignificant() != ')') {
             fail(board, record.phase, "variation must contain exactly one trace node");
         }
         parser_.expect(')');
-        return {action, child.outcome, child.expanded};
+        return {action, child.outcome};
     }
 
     std::vector<SearchAction> legalActions(Board board, Phase phase) const
@@ -991,36 +839,13 @@ private:
         return actions;
     }
 
-    void checkCounts(Board board,
-                     const TraceRecord& record,
-                     const std::vector<TraceChildSummary>& children) const
-    {
-        if (record.children_visited != children.size()) {
-            fail(board, record.phase, "children_visited does not match SGF child variations");
-        }
-        const std::uint64_t expanded = static_cast<std::uint64_t>(std::count_if(
-            children.begin(), children.end(), [](const TraceChildSummary& child) {
-                return child.expanded;
-            }));
-        if (record.children_expanded != expanded) {
-            fail(board, record.phase, "children_expanded does not match child records");
-        }
-        if (record.children_skipped != record.skipped_actions.size()) {
-            fail(board, record.phase,
-                 "children_skipped does not match children_skipped_actions");
-        }
-    }
-
     void checkActionPartition(Board board,
                               const TraceRecord& record,
                               const std::vector<TraceChildSummary>& children,
                               const std::vector<SearchAction>& legal)
     {
-        if (record.children_total != legal.size()) {
-            fail(board, record.phase, "children_total does not match generated legal actions");
-        }
         if (children.size() + record.skipped_actions.size() != legal.size()) {
-            fail(board, record.phase, "visited and skipped actions do not cover children_total");
+            fail(board, record.phase, "visited and skipped actions do not cover all legal actions");
         }
 
         std::array<bool, 36> legal_ids{};
@@ -1067,30 +892,19 @@ private:
 
     const RzProofEntry* checkRZoneAnnotation(Board board, const TraceRecord& record)
     {
-        const unsigned present = static_cast<unsigned>(record.rzone_hit.has_value()) +
-            static_cast<unsigned>(record.rzone_certificate_id.has_value()) +
-            static_cast<unsigned>(record.rzone_kind.has_value()) +
-            static_cast<unsigned>(record.rzone_mask.has_value()) +
-            static_cast<unsigned>(record.rzone_masked_board.has_value()) +
-            static_cast<unsigned>(record.rzone_depth.has_value());
+        const unsigned present = static_cast<unsigned>(record.rzone_certificate_id.has_value()) +
+            static_cast<unsigned>(record.rzone_transform.has_value());
         const bool rzone_leaf = record.solved_by == SolvedBy::RZoneTable;
         if (present == 0) {
             if (rzone_leaf) fail(board, record.phase, "RZone leaf is missing its certificate annotation");
             return nullptr;
         }
-        if (present != 6) {
+        if (present != 2) {
             fail(board, record.phase, "RZone certificate annotation is incomplete");
         }
-        if (record.rzone_symmetry_hit.has_value() != record.rzone_transform.has_value()) {
-            fail(board, record.phase, "RZone symmetry annotation is incomplete");
-        }
-        const std::uint8_t transform = record.rzone_transform.value_or(0);
+        const std::uint8_t transform = *record.rzone_transform;
         if (transform != 0 && !manifest_.rzone_symmetry) {
             fail(board, record.phase, "RZone transform is present while symmetry lookup is disabled");
-        }
-        if (record.rzone_symmetry_hit &&
-            *record.rzone_symmetry_hit != (transform != 0)) {
-            fail(board, record.phase, "rzone_symmetry_hit disagrees with rzone_transform");
         }
         if (!rzone_table_) {
             fail(board, record.phase, "RZone annotation has no bound .rz artifact");
@@ -1107,14 +921,6 @@ private:
         if (record.outcome != Outcome::Win) {
             fail(board, record.phase, "RZone certificate may only annotate a Win node");
         }
-        if (entry->kind != *record.rzone_kind || entry->mask != *record.rzone_mask ||
-            entry->masked_board != *record.rzone_masked_board ||
-            entry->depth != *record.rzone_depth) {
-            fail(board, record.phase, "RZone annotation differs from the bound certificate record");
-        }
-        if (*record.rzone_hit != rzone_leaf) {
-            fail(board, record.phase, "rzone_hit disagrees with solved_by");
-        }
         ++statistics_.rzone_annotations_checked;
         return entry;
     }
@@ -1124,9 +930,6 @@ private:
                               const std::vector<TraceChildSummary>& children,
                               const std::vector<SearchAction>& legal)
     {
-        if (!record.expanded || record.terminal_reason != TerminalReason::None || record.tt_hit) {
-            fail(board, record.phase, "BACKPROPAGATION node metadata is inconsistent");
-        }
         if (legal.empty()) fail(board, record.phase, "BACKPROPAGATION node has no legal actions");
         checkActionPartition(board, record, children, legal);
         ++statistics_.backpropagation_nodes_checked;
@@ -1195,43 +998,23 @@ private:
     void checkTtLeaf(Board board,
                      const TraceRecord& record,
                      const std::vector<TraceChildSummary>& children,
-                     const std::vector<SearchAction>& legal)
+                     const std::vector<SearchAction>& legal,
+                     std::uint64_t implicit_node_id)
     {
-        if (!manifest_.transposition_table || record.expanded || !record.tt_hit ||
-            record.terminal_reason != TerminalReason::TranspositionTable || !children.empty() ||
-            record.children_visited != 0 || record.children_expanded != 0 ||
-            record.children_skipped != 0 || !record.skipped_actions.empty()) {
+        if (!manifest_.transposition_table || !children.empty() ||
+            !record.skipped_actions.empty()) {
             fail(board, record.phase, "TT leaf metadata or child counts are inconsistent");
         }
-        if (!record.tt_source || (*record.tt_source != "trace" && *record.tt_source != "persistent")) {
-            fail(board, record.phase, "TT leaf has an invalid or missing tt_source");
-        }
-        if (!record.tt_phase || *record.tt_phase != record.phase) {
-            fail(board, record.phase, "TT leaf tt_phase does not match node_type");
-        }
-        if (*record.tt_source == "trace") {
-            if (!record.tt_source_node_id || *record.tt_source_node_id >= record.node_id) {
-                fail(board, record.phase, "trace TT source must be an earlier node_id");
-            }
-        } else if (record.tt_source_node_id) {
-            fail(board, record.phase, "persistent TT leaf must not name a trace source node");
+        if (record.tt_source_node_id && *record.tt_source_node_id >= implicit_node_id) {
+            fail(board, record.phase, "trace TT source must be an earlier implicit preorder node ID");
         }
 
         const CanonicalBoard canonical = table_.usesSymmetry()
             ? canonicalize(board)
             : CanonicalBoard{board, 0};
-        if (!record.tt_key || *record.tt_key != canonical.board.raw) {
-            fail(board, record.phase, "TT leaf key does not match the independently canonicalized board");
-        }
-        if (table_.usesSymmetry()) {
-            if (!record.tt_transform || *record.tt_transform != canonical.transform) {
-                fail(board, record.phase, "TT leaf transform does not match canonicalization");
-            }
-        }
         const ProofEntry* entry = table_.find(record.phase, canonical.board.raw);
         if (!entry) fail(board, record.phase, "TT leaf key is absent from the supplied TT file");
-        if (entry->outcome != record.outcome || entry->children_total != legal.size() ||
-            record.children_total != legal.size()) {
+        if (entry->outcome != record.outcome || entry->children_total != legal.size()) {
             fail(board, record.phase, "TT leaf claim differs from the supplied TT entry or game rules");
         }
         std::optional<SearchAction> witness;
@@ -1245,12 +1028,7 @@ private:
                         const RzProofEntry& entry,
                         const std::vector<TraceChildSummary>& children)
     {
-        if (record.outcome != Outcome::Win || record.expanded ||
-            record.terminal_reason != TerminalReason::None || record.tt_hit ||
-            record.tt_source || record.tt_phase || record.tt_key ||
-            record.tt_source_node_id || record.tt_transform || !children.empty() ||
-            record.children_total != 0 || record.children_visited != 0 ||
-            record.children_expanded != 0 || record.children_skipped != 0 ||
+        if (record.outcome != Outcome::Win || record.tt_source_node_id || !children.empty() ||
             !record.skipped_actions.empty()) {
             fail(board, record.phase, "RZone leaf metadata or child counts are inconsistent");
         }
@@ -1278,17 +1056,13 @@ private:
     {
         ++statistics_.nodes_checked;
         statistics_.maximum_depth = std::max(statistics_.maximum_depth, depth);
-        const std::uint64_t expected_id = statistics_.nodes_checked;
-        if (record.node_id != expected_id || record.dfs_visit_order != expected_id) {
-            fail(board, record.phase, "node_id/dfs_visit_order is not continuous DFS preorder");
-        }
+        const std::uint64_t implicit_node_id = statistics_.nodes_checked;
 
         std::vector<TraceChildSummary> children;
         while (parser_.peekSignificant() == '(') {
             children.push_back(verifyVariation(
-                board, record.phase, static_cast<std::uint64_t>(children.size()), depth + 1));
+                board, record.phase, depth + 1));
         }
-        checkCounts(board, record, children);
 
         const bool winning = boardHasWinningTile(board, manifest_.winning_tile);
         const std::vector<SearchAction> legal = winning
@@ -1297,37 +1071,31 @@ private:
         const RzProofEntry* rzone_entry = checkRZoneAnnotation(board, record);
 
         if (record.solved_by == SolvedBy::Terminal) {
-            if (record.tt_hit || record.selected_action || !record.skipped_actions.empty() ||
+            if (record.selected_action || !record.skipped_actions.empty() ||
                 !children.empty()) {
                 fail(board, record.phase, "terminal node contains TT, witness, skipped, or child data");
             }
             if (winning) {
-                if (record.outcome != Outcome::Win ||
-                    record.terminal_reason != TerminalReason::WinningTile || record.expanded ||
-                    record.children_total != 0) {
+                if (record.outcome != Outcome::Win) {
                     fail(board, record.phase, "winning-tile terminal metadata is inconsistent");
                 }
             } else {
                 if (record.phase != Phase::Player || !legal.empty() ||
-                    record.outcome != Outcome::Loss ||
-                    record.terminal_reason != TerminalReason::NoLegalMove || !record.expanded ||
-                    record.children_total != 0) {
+                    record.outcome != Outcome::Loss) {
                     fail(board, record.phase, "no-legal-move terminal metadata is inconsistent");
                 }
             }
             ++statistics_.terminal_nodes_checked;
         } else if (record.solved_by == SolvedBy::TranspositionTable) {
             if (winning) fail(board, record.phase, "winning tile must terminate before TT lookup");
-            checkTtLeaf(board, record, children, legal);
+            checkTtLeaf(board, record, children, legal, implicit_node_id);
         } else if (record.solved_by == SolvedBy::RZoneTable) {
             if (winning) fail(board, record.phase, "winning tile must terminate before RZone lookup");
             if (!rzone_entry) fail(board, record.phase, "RZone leaf lacks a valid certificate");
             checkRZoneLeaf(board, record, *rzone_entry, children);
         } else if (record.solved_by == SolvedBy::NodeLimit) {
             if (winning || manifest_.node_limit == 0 || record.outcome != Outcome::Unknown ||
-                record.terminal_reason != TerminalReason::NodeLimit || record.expanded ||
-                record.tt_hit || record.children_total != 0 || !children.empty() ||
-                record.selected_action || !record.skipped_actions.empty()) {
+                !children.empty() || record.selected_action || !record.skipped_actions.empty()) {
                 fail(board, record.phase, "node-limit leaf metadata is inconsistent");
             }
             ++statistics_.node_limit_leaves_checked;
@@ -1337,7 +1105,7 @@ private:
         } else {
             fail(board, record.phase, "node has no valid solved_by classification");
         }
-        return {record.outcome, record.expanded};
+        return {record.outcome};
     }
 
     const std::filesystem::path& path_;
@@ -1522,9 +1290,6 @@ ProofManifest readProofManifest(const std::filesystem::path& sgf_path)
     const auto fields = parseCommentFields(
         singleProperty(second_opening, "C", sgf_path), sgf_path);
     manifest.root_outcome = parseOutcome(requiredField(fields, "solver_status", sgf_path), sgf_path);
-    if (requiredField(fields, "node_type", sgf_path) != "PLAYER") {
-        fileFail(sgf_path, "fixed-opening root node_type must be PLAYER");
-    }
     manifest.winning_tile = parseUnsigned<unsigned>(
         requiredField(fields, "winning_tile", sgf_path), "winning_tile", sgf_path);
     manifest.node_limit = parseUnsigned<std::uint64_t>(

@@ -10,95 +10,39 @@
 namespace solver2048 {
 namespace {
 
-std::size_t expandedChildren(const TraceNode& node)
-{
-    std::size_t count = 0;
-    for (const auto& child : node.children) {
-        if (child->expanded) ++count;
-    }
-    return count;
-}
-
 std::string nodeComment(const TraceNode& node, const SgfMetadata* metadata)
 {
     std::ostringstream comment;
     comment << std::setprecision(12);
     comment << "solver_status: " << outcomeName(node.outcome) << '\n'
-            << "solved_by = " << solvedByName(node.solved_by) << '\n'
-            << "node_id = " << node.trace_id << '\n'
-            << "dfs_visit_order = " << node.trace_id << '\n'
-            << "node_type = " << phaseName(node.phase) << '\n'
-            << "expanded = " << (node.expanded ? "true" : "false") << '\n'
-            << "dfs_order = " << node.dfs_order << '\n'
-            << "children_total = " << node.children_total << '\n'
-            << "children_visited = " << node.children.size() << '\n'
-            << "children_expanded = " << expandedChildren(node) << '\n'
-            << "children_skipped = " << node.skipped_actions.size() << '\n';
+            << "solved_by = " << solvedByName(node.solved_by) << '\n';
 
     if (node.tt_hit) {
-        comment << "tt_hit = true\n";
-        comment << "tt_source = " << (node.tt_persistent_hit ? "persistent" : "trace") << '\n';
-        comment << "tt_phase = " << phaseName(node.phase) << '\n';
-        if (node.tt_key) {
-            comment << "tt_key = 0x" << std::hex << std::setw(16) << std::setfill('0')
-                    << *node.tt_key << std::dec << std::setfill(' ') << '\n';
-        }
-        comment << "tt_symmetry_hit = " << (node.tt_symmetry_hit ? "true" : "false") << '\n';
-        if (node.tt_transform) {
-            comment << "tt_transform = " << static_cast<unsigned>(*node.tt_transform)
-                    << ':' << symmetryTransformName(*node.tt_transform) << '\n';
-        }
         if (node.tt_source_trace_id) {
             comment << "tt_source_node_id = " << *node.tt_source_trace_id << '\n';
         }
     }
 
     if (node.rzone_certificate_id) {
-        comment << "rzone_hit = " << (node.rzone_hit ? "true" : "false") << '\n'
-                << "rzone_symmetry_hit = "
-                << (node.rzone_symmetry_hit ? "true" : "false") << '\n'
-                << "rzone_certificate_id = " << *node.rzone_certificate_id << '\n';
+        comment << "rzone_certificate_id = " << *node.rzone_certificate_id << '\n';
         const std::uint8_t transform = node.rzone_transform.value_or(0);
-        comment << "rzone_transform = " << static_cast<unsigned>(transform)
-                << ':' << symmetryTransformName(transform) << '\n';
-        if (node.rzone_kind) {
-            comment << "rzone_kind = " << rzoneStepKindName(*node.rzone_kind) << '\n';
-        }
-        if (node.rzone_mask) {
-            comment << "rzone_mask = 0x" << std::hex << std::setw(4) << std::setfill('0')
-                    << *node.rzone_mask << std::dec << std::setfill(' ') << '\n';
-        }
-        if (node.rzone_masked_board) {
-            comment << "rzone_masked_board = 0x" << std::hex << std::setw(16)
-                    << std::setfill('0') << *node.rzone_masked_board << std::dec
-                    << std::setfill(' ') << '\n';
-        }
-        if (node.rzone_depth) comment << "rzone_depth = " << *node.rzone_depth << '\n';
+        comment << "rzone_transform = " << static_cast<unsigned>(transform) << '\n';
     }
 
     if (!node.skipped_actions.empty()) {
         comment << "children_skipped_actions = ";
         for (std::size_t index = 0; index < node.skipped_actions.size(); ++index) {
             if (index != 0) comment << ' ';
-            comment << node.skipped_actions[index].summaryToken();
+            comment << node.skipped_actions[index].sgfId();
         }
         comment << '\n';
     }
-    comment << "terminal_reason = " << terminalReasonName(node.terminal_reason);
-    if (node.reward) comment << '\n' << "reward = " << *node.reward;
-    if (node.afterstate_value) {
-        comment << '\n' << "afterstate_value = " << *node.afterstate_value;
-    }
-    if (node.action_value) comment << '\n' << "action_value = " << *node.action_value;
     if (node.selected_action) {
-        comment << '\n' << "selected_action = " << node.selected_action->summaryToken();
-    }
-    if (node.selected_action_value) {
-        comment << '\n' << "selected_action_value = " << *node.selected_action_value;
+        comment << "selected_action = " << node.selected_action->sgfId() << '\n';
     }
 
     if (metadata) {
-        comment << '\n' << "winning_tile = " << metadata->winning_tile
+        comment << "winning_tile = " << metadata->winning_tile
                 << '\n' << "node_limit = " << metadata->node_limit
                 << '\n' << "transposition_table = "
                 << (metadata->use_transposition_table ? "enabled" : "disabled")
@@ -125,7 +69,6 @@ std::string nodeComment(const TraceNode& node, const SgfMetadata* metadata)
                 << '\n' << "config_file = " << metadata->config_path.string()
                 << '\n' << "network = " << metadata->network
                 << '\n' << "model = " << metadata->model_path
-                << '\n' << "fixed_opening = " << formatOpening(metadata->opening)
                 << '\n' << "elapsed_seconds = " << metadata->elapsed_seconds
                 << '\n' << "player_nodes = " << metadata->statistics.player_nodes
                 << '\n' << "environment_nodes = " << metadata->statistics.environment_nodes
@@ -134,9 +77,6 @@ std::string nodeComment(const TraceNode& node, const SgfMetadata* metadata)
                 << '\n' << "node_limit_cutoffs = " << metadata->statistics.node_limit_cutoffs
                 << '\n' << "player_tt_hits = " << metadata->statistics.player_tt_hits
                 << '\n' << "environment_tt_hits = " << metadata->statistics.environment_tt_hits
-                << '\n' << "player_tt_exact_hits = " << metadata->statistics.playerTtExactHits()
-                << '\n' << "environment_tt_exact_hits = "
-                << metadata->statistics.environmentTtExactHits()
                 << '\n' << "player_tt_symmetry_hits = "
                 << metadata->statistics.player_tt_symmetry_hits
                 << '\n' << "environment_tt_symmetry_hits = "
@@ -152,9 +92,6 @@ std::string nodeComment(const TraceNode& node, const SgfMetadata* metadata)
                 << '\n' << "player_tt_new_entries = " << metadata->statistics.player_tt_stores
                 << '\n' << "environment_tt_new_entries = "
                 << metadata->statistics.environment_tt_stores
-                << '\n' << "player_tt_entries = " << metadata->statistics.playerTtEntries()
-                << '\n' << "environment_tt_entries = "
-                << metadata->statistics.environmentTtEntries()
                 << '\n' << "rzone_loaded_certificates = "
                 << metadata->statistics.rzone.loaded_certificates
                 << '\n' << "rzone_patterns_stored = "
