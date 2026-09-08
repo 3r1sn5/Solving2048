@@ -1064,6 +1064,9 @@ function bootViewer() {
     ];
     if (selected === state.searchRoot) {
       values.push(
+        ["Player nodes visited", commentValue(selected, "player_nodes")],
+        ["Environment nodes visited", commentValue(selected, "environment_nodes")],
+        ["Nodes visited", sumIntegerFields(selected, "player_nodes", "environment_nodes")],
         ["TT mode", commentValue(selected, "transposition_table")],
         ["TT symmetry mode", commentValue(selected, "tt_symmetry")],
         ["Player TT hits", commentValue(selected, "player_tt_hits")],
@@ -1086,6 +1089,22 @@ function bootViewer() {
         ["RZone exact hits", commentValue(selected, "rzone_exact_orientation_hits")],
         ["RZone symmetry hits", commentValue(selected, "rzone_symmetry_hits")],
         ["RZone transforms tested", commentValue(selected, "rzone_lookup_transforms_tested")],
+        ["RZone active pruning", commentValue(selected, "rzone_active_pruning")],
+        ["RZone active AND nodes", commentValue(selected, "rzone_active_pruning_and_nodes")],
+        ["RZone active certs tested",
+          commentValue(selected, "rzone_active_pruning_certificates_tested")],
+        ["RZone active transforms",
+          commentValue(selected, "rzone_active_pruning_transform_tests")],
+        ["RZone active child hits",
+          commentValue(selected, "rzone_active_pruning_children_matched")],
+        ["RZone full lookups avoided",
+          commentValue(selected, "rzone_active_pruning_full_lookups_avoided")],
+        ["RZone active AND nodes closed",
+          commentValue(selected, "rzone_active_pruning_and_nodes_closed")],
+        ["RZone active lift attempts",
+          commentValue(selected, "rzone_active_pruning_universal_lift_attempts")],
+        ["RZone active lift successes",
+          commentValue(selected, "rzone_active_pruning_universal_lift_successes")],
       );
     }
     for (const [label, value] of values) elements.metrics.appendChild(metric(label, value));

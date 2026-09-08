@@ -47,8 +47,10 @@ solver/solver2048 --config solver/target16.cfg
 
 The cfg format is strict `key=value`, with blank lines, full-line comments, and
 inline `# comments` supported. Unknown, duplicate, missing, or ill-typed keys
-are errors. Relative model and SGF paths use the process working directory,
-matching the referenced `game-solver` behavior. The complete supported file is:
+are errors. `rzone_active_pruning` is a backward-compatible optional key and
+defaults to `false` when omitted. Relative
+model and SGF paths use the process working directory, matching the referenced
+`game-solver` behavior. The complete supported file is:
 
 ```ini
 winning_tile=8
@@ -64,6 +66,7 @@ rzone_lookup_policy=smallest_first
 use_rzone_symmetry=true
 rzone_max_cells=16
 rzone_shadow_exact_check=false
+rzone_active_pruning=false
 load_rz=false
 save_rz=true
 rz_path=result/RZ/8_RZ.rz
@@ -106,9 +109,15 @@ path-expanded baseline; `--no-tt` also disables persistent load/save.
 
 The lookup order is winning terminal, RZone, exact TT, node limit, then
 expansion. Thus an already-proven entry remains usable even when the node
-budget has just been exhausted. Neither an RZone nor exact-TT hit consumes the
-expanded-node budget or searched-action counters. With `load_tt=true`, an existing snapshot is loaded before
-search; a missing file starts with empty tables. With `save_tt=true`, all loaded
+budget has just been exhausted. `player_nodes` and
+`environment_nodes` count every node entered by DFS, including terminal, TT,
+RZone, and node-limit leaves. A sibling resolved by parent-level active pruning
+is not visited and therefore is excluded, even though its proof-compatible
+`RZONE_TT` leaf remains in SGF. The node limit and progress interval use this
+visited-node count. New SGFs declare `node_count_semantics=visited`. With
+`load_tt=true`, an
+existing snapshot is loaded before search; a missing file starts with empty
+tables. With `save_tt=true`, all loaded
 and newly proven entries are streamed to `<tt_path>.tmp`, checksummed, and
 atomically renamed after search. The file is tied to the winning tile, rules,
 board encoding, and symmetry mode, but not to an opening or N-tuple model, so it
@@ -160,7 +169,7 @@ same as the RZone-disabled baseline.
 
 `rzone_mode=lookup` checks the in-memory RZone table before the exact TT. A
 matching partial board pattern returns a Win proof leaf without replay and
-without increasing expanded-node or action counts. Certificates are built by
+without generating that node's actions. Certificates are built by
 three local rules: a one-cell winning terminal, a fixed winning Player slide
 whose source preimage is sufficient to determine the relevant output, and an
 Environment universal-placement step whose relevant cells are all non-empty.
@@ -186,6 +195,16 @@ still performs no certificate replay. The SGF records the certificate ID and
 numeric `rzone_transform`; a nonzero transform identifies a symmetry hit and is
 independently validated by the proof checker. Use
 `--no-rzone-symmetry` for the exact-orientation baseline.
+
+`rzone_active_pruning=true` (or `--rzone-active-pruning`) lets an expanded
+Environment AND node reuse a Player-Win certificate as soon as one child
+produces it. The solver directly tests that specific certificate against every
+remaining placement sibling instead of making each sibling scan the full
+RZone index. A match becomes the same lightweight `RZONE_TT` Win leaf as a
+normal lookup, in the original placement order, so the current SGF proof and
+proof checker behavior are unchanged. The optimization requires
+`rzone_mode=lookup`; use `--no-rzone-active-pruning` for the passive-lookup
+baseline.
 
 This first version stores only Player-view Win proofs. Exact TT remains the
 fallback for Loss results and Win states whose RZone derivation stops. RZone

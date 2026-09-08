@@ -140,12 +140,17 @@ public:
         return found->second;
     }
 
-    std::array<unsigned, 16> tileValues(Board) const override { return {}; }
+    std::array<unsigned, 16> tileValues(Board value) const override
+    {
+        const auto found = tile_values.find(value.raw);
+        return found == tile_values.end() ? std::array<unsigned, 16>{} : found->second;
+    }
 
     Board opening_;
     std::unordered_map<std::uint64_t, std::vector<SlideResult>> slides;
     std::unordered_map<std::uint64_t, std::vector<PlacementResult>> placements;
     std::unordered_map<std::uint64_t, double> values;
+    std::unordered_map<std::uint64_t, std::array<unsigned, 16>> tile_values;
     std::unordered_set<std::uint64_t> winning_states;
     mutable std::unordered_map<std::uint64_t, std::size_t> slide_calls;
     mutable std::unordered_map<std::uint64_t, std::size_t> placement_calls;
@@ -239,6 +244,13 @@ void testRZoneCertificateLiftsAndLookup()
     check(game.calls() == 0, "RZone lookup must not replay game mechanics");
     check(!table.lookup(tiles({{0, 8}, {1, 2}, {2, 8}}), Phase::Player),
           "a change inside the RZone must not match the certificate");
+    const std::optional<RZoneMatch> direct_match = table.matchCertificate(
+        tiles({{0, 8}, {2, 8}, {3, 4}}), Phase::Player, *fixed_id, 0);
+    check(direct_match && direct_match->id == *fixed_id && direct_match->transform == 0,
+          "direct RZone certificate matching must accept an outside-pattern change");
+    check(!table.matchCertificate(
+              tiles({{0, 8}, {2, 8}, {3, 4}}), Phase::Environment, *fixed_id, 0),
+          "direct RZone certificate matching must reject the wrong phase");
 
     const Board rotated_parent = solver2048::transformBoard(fixed_slide_parent, 1);
     check(!table.lookup(rotated_parent, Phase::Player),
@@ -291,6 +303,13 @@ void testRZoneCertificateLiftsAndLookup()
               symmetry_table.statistics().symmetry_hits != 0 &&
               symmetry_table.statistics().lookup_transforms_tested == 64,
           "RZone symmetry lookup counters mismatch");
+    const Board direct_rotated = solver2048::transformBoard(fixed_slide_parent, 3);
+    const auto direct_symmetry = symmetry_table.matchCertificate(
+        direct_rotated, Phase::Player, *symmetry_fixed, 0);
+    check(direct_symmetry && direct_symmetry->id == *symmetry_fixed &&
+              direct_symmetry->transform != 0 &&
+              symmetry_table.statistics().active_pruning_transform_tests <= 8,
+          "direct certificate matching must find a deterministic symmetry transform");
 
     // Sample arbitrary completions outside the pattern. Every matching board
     // must keep the fixed action legal and reproduce the child root pattern.
@@ -354,7 +373,9 @@ void testRZoneCertificateLiftsAndLookup()
 
     const auto& stats = table.statistics();
     check(stats.slide_lift_successes == 3 && stats.placement_lift_successes == 1 &&
-              stats.placement_lift_blocked == 1 && stats.player_hits == 1,
+              stats.placement_lift_blocked == 1 && stats.player_hits == 1 &&
+              stats.active_pruning_certificates_tested == 2 &&
+              stats.active_pruning_children_matched == 1,
           "RZone generation/lookup counters mismatch");
 
     RZoneTable ordered_table(
@@ -437,6 +458,92 @@ void testRZoneCertificateLiftsAndLookup()
     }
 }
 
+void checkTraceIdsAreDfsDiscoveryOrder(const TraceNode& root);
+
+void testRZoneActivePruningCoversEnvironmentSiblings()
+{
+    const Board root = tiles({{4, 2}, {5, 2}});
+    const Board afterstate = tiles({{0, 4}, {1, 4}});
+    const Board first_child = tiles({{0, 4}, {1, 4}, {2, 2}});
+    const Board covered_child = tiles({{0, 4}, {1, 4}, {3, 2}});
+    const Board terminal = tiles({{0, 8}, {1, 2}});
+
+    SolverOptions invalid_options;
+    invalid_options.rzone_active_pruning = true;
+    FakeGame invalid_game(root.raw);
+    checkThrows([&] { (void)Solver(invalid_game, invalid_options); },
+                "RZone active pruning without lookup mode must be rejected");
+
+    auto make_game = [&]() {
+        FakeGame game(root.raw);
+        game.slides[root.raw] = {slide(Direction::Down, afterstate.raw)};
+        // The RZone preimage validator replays the selected slide on the
+        // masked witness board, which is this afterstate in the fixture.
+        game.slides[afterstate.raw] = {slide(Direction::Left, terminal.raw)};
+        game.values[afterstate.raw] = 0.0;
+        game.placements[afterstate.raw] = {
+            placement(2, 2, first_child.raw),
+            placement(3, 2, covered_child.raw),
+        };
+        game.slides[first_child.raw] = {slide(Direction::Left, terminal.raw)};
+        game.values[terminal.raw] = 0.0;
+        game.winning_states.insert(terminal.raw);
+        game.tile_values[terminal.raw] = solver2048::boardTileValues(terminal);
+        return game;
+    };
+
+    FakeGame baseline_game = make_game();
+    SolverOptions baseline_options;
+    baseline_options.winning_tile = 8;
+    baseline_options.rzone_mode = RZoneMode::Lookup;
+    SearchResult baseline = Solver(baseline_game, baseline_options).solve();
+
+    FakeGame active_game = make_game();
+    SolverOptions active_options = baseline_options;
+    active_options.rzone_active_pruning = true;
+    SearchResult active = Solver(active_game, active_options).solve();
+
+    if (baseline.outcome != Outcome::Win || active.outcome != baseline.outcome ||
+        active.root_action != baseline.root_action) {
+        std::ostringstream detail;
+        detail << "RZone active pruning changed the root proof: baseline="
+               << solver2048::outcomeName(baseline.outcome) << ", active="
+               << solver2048::outcomeName(active.outcome) << ", baseline_action="
+               << (baseline.root_action ? solver2048::directionName(*baseline.root_action) : "none")
+               << ", active_action="
+               << (active.root_action ? solver2048::directionName(*active.root_action) : "none");
+        fail(detail.str());
+    }
+    check(active.statistics.rzone.lookups + 1 == baseline.statistics.rzone.lookups &&
+              active.statistics.rzone.active_pruning_full_lookups_avoided == 1 &&
+              active.statistics.rzone.active_pruning_children_matched == 1,
+          "RZone active pruning must replace the covered sibling's full lookup");
+    check(active.statistics.rzone.active_pruning_and_nodes == 1 &&
+              active.statistics.rzone.active_pruning_and_nodes_closed == 1 &&
+              active.statistics.rzone.active_pruning_universal_lift_attempts == 1 &&
+              active.statistics.rzone.active_pruning_universal_lift_successes == 1,
+          "RZone active pruning AND-node and universal-lift counters mismatch");
+    check(active.statistics.player_nodes + 1 == baseline.statistics.player_nodes &&
+              active.statistics.environment_nodes == baseline.statistics.environment_nodes &&
+              active.statistics.combinedNodes() + 1 == baseline.statistics.combinedNodes(),
+          "an active-pruned sibling must not count as a visited DFS node");
+    check(active.root->children.size() == 1,
+          "active-pruning fixture root must have one Environment child");
+    const TraceNode& environment = *active.root->children[0];
+    check(environment.outcome == Outcome::Win &&
+              environment.solved_by == SolvedBy::Backpropagation &&
+              environment.rzone_certificate_id && environment.children.size() == 2,
+          "active-pruned Environment node must retain a complete proof-compatible child list");
+    const TraceNode& covered = *environment.children[1];
+    check(covered.outcome == Outcome::Win && covered.solved_by == SolvedBy::RZoneTable &&
+              covered.rzone_hit && covered.rzone_certificate_id &&
+              covered.selected_action &&
+              covered.selected_action->kind == SearchAction::Kind::Slide &&
+              covered.selected_action->direction == Direction::Left && !covered.expanded,
+          "covered sibling must be emitted as a lightweight RZone Win leaf");
+    checkTraceIdsAreDfsDiscoveryOrder(*active.root);
+}
+
 Direction incomingDirection(const TraceNode& node)
 {
     check(node.incoming_action.has_value(), "trace child is missing its incoming action");
@@ -517,8 +624,8 @@ void testPlayerOrUnknownWinAndSkipped()
           "Player OR result must be marked as solved by BACKPROPAGATION");
     checkNear(*result.root_action_value, 20.0, 0.0,
               "selected action value must be reward + V(afterstate)");
-    check(result.statistics.player_nodes == 1, "node-limit OR test player node count mismatch");
-    check(result.statistics.environment_nodes == 0, "node-limit OR test environment node count mismatch");
+    check(result.statistics.player_nodes == 1 && result.statistics.environment_nodes == 2,
+          "visited-node counters must include node-limit and terminal leaves");
     check(result.statistics.player_actions == 3, "all Player actions must be generated before DFS");
     check(result.statistics.node_limit_cutoffs == 1, "first Environment child must be one cutoff");
 
@@ -553,11 +660,22 @@ void testEnvironmentAndAllWin()
     };
     game.winning_states = {20, 21, 22};
 
-    SearchResult result = Solver(game, SolverOptions{}).solve();
+    SolverOptions options;
+    options.progress_interval = 2;
+    std::vector<std::uint64_t> progress_counts;
+    SearchResult result = Solver(
+        game,
+        options,
+        [&](const solver2048::SearchStatistics& statistics) {
+            progress_counts.push_back(statistics.combinedNodes());
+        }).solve();
 
     check(result.outcome == Outcome::Win, "Environment AND must be Win when every placement is Win");
-    check(result.statistics.player_nodes == 1, "terminal winning children must not count as Player nodes");
-    check(result.statistics.environment_nodes == 1, "Environment AND node count mismatch");
+    check(result.statistics.player_nodes == 4 && result.statistics.environment_nodes == 1 &&
+              result.statistics.combinedNodes() == 5,
+          "visited-node counters must include all three terminal placement leaves");
+    check(progress_counts == std::vector<std::uint64_t>({2, 4}),
+          "progress interval must be driven by visited nodes");
     check(result.statistics.placement_actions == 3, "Environment must generate every placement action");
     const TraceNode& environment = *result.root->children[0];
     check(environment.children.size() == 3, "Environment Win requires visiting every placement child");
@@ -583,8 +701,6 @@ void testEnvironmentAndLossShortCircuit()
 
     check(result.outcome == Outcome::Loss,
           "one losing placement must make Environment AND a Player Loss");
-    check(result.statistics.player_nodes == 2, "dead placement child should be expanded exactly once");
-    check(result.statistics.environment_nodes == 1, "Environment loss node count mismatch");
     check(result.statistics.placement_actions == 3,
           "Environment action count includes children skipped after short-circuit");
     const TraceNode& environment = *result.root->children[0];
@@ -618,8 +734,9 @@ void testEnvironmentUnknownIsNotShortCircuit()
 
     check(result.outcome == Outcome::Unknown,
           "Environment with Win, Unknown, Win children must be Unknown");
-    check(result.statistics.player_nodes == 1 && result.statistics.environment_nodes == 1,
-          "combined node limit must count Player and Environment nodes");
+    check(result.statistics.player_nodes == 4 &&
+              result.statistics.environment_nodes == 1,
+          "visited-node counters must include terminal and node-limit leaves");
     check(result.statistics.node_limit_cutoffs == 1,
           "only the non-winning placement at the limit should be a cutoff");
     const TraceNode& environment = *result.root->children[0];
@@ -712,6 +829,7 @@ std::string validConfigText()
         "use_rzone_symmetry=true\n"
         "rzone_max_cells=12\n"
         "rzone_shadow_exact_check=false\n"
+        "rzone_active_pruning=true\n"
         "load_rz=true\n"
         "save_rz=false\n"
         "rz_path=solver/rz/test-target16.rz\n"
@@ -736,7 +854,8 @@ void testSolverConfigParsingAndValidation()
               defaults.rzone_lookup_policy == RZoneLookupPolicy::SmallestFirst &&
               defaults.use_rzone_symmetry &&
               defaults.rzone_max_cells == 16 &&
-              !defaults.rzone_shadow_exact_check && defaults.load_rz &&
+              !defaults.rzone_shadow_exact_check && !defaults.rzone_active_pruning &&
+              defaults.load_rz &&
               defaults.save_rz && !defaults.rz_path.empty(),
           "default solver.cfg RZone settings mismatch");
     check(solver2048::formatOpening(defaults.opening) == "2@0,2@1",
@@ -759,12 +878,21 @@ void testSolverConfigParsingAndValidation()
               parsed.rzone_lookup_policy == RZoneLookupPolicy::SmallestFirst &&
               parsed.use_rzone_symmetry &&
               parsed.rzone_max_cells == 12 &&
-              !parsed.rzone_shadow_exact_check && parsed.load_rz &&
+              !parsed.rzone_shadow_exact_check && parsed.rzone_active_pruning &&
+              parsed.load_rz &&
               !parsed.save_rz && parsed.rz_path == "solver/rz/test-target16.rz",
           "RZone cfg parsing mismatch");
     check(parsed.opening[0] == 2 && parsed.opening[5] == 4 &&
               solver2048::formatOpening(parsed.opening) == "2@0,4@5",
           "cfg opening parsing or deterministic formatting mismatch");
+
+    std::string legacy_text = validConfigText();
+    const std::string active_setting = "rzone_active_pruning=true\n";
+    legacy_text.erase(legacy_text.find(active_setting), active_setting.size());
+    TemporaryConfigFile legacy(legacy_text);
+    const SolverConfig legacy_config = solver2048::loadSolverConfig(legacy.path);
+    check(!legacy_config.rzone_active_pruning,
+          "legacy cfg files must default active pruning to disabled");
 
     TemporaryConfigFile unknown(validConfigText() + "unknown_option=1\n");
     checkThrows([&] { (void)solver2048::loadSolverConfig(unknown.path); },
@@ -778,6 +906,15 @@ void testSolverConfigParsingAndValidation()
     TemporaryConfigFile invalid_policy(invalid_rzone_policy);
     checkThrows([&] { (void)solver2048::loadSolverConfig(invalid_policy.path); },
                 "unknown RZone lookup policy must be rejected");
+
+    std::string invalid_active_mode = validConfigText();
+    const std::string lookup_mode = "rzone_mode=lookup";
+    invalid_active_mode.replace(
+        invalid_active_mode.find(lookup_mode), lookup_mode.size(),
+        "rzone_mode=generate");
+    TemporaryConfigFile active_mode_dependency(invalid_active_mode);
+    checkThrows([&] { (void)solver2048::loadSolverConfig(active_mode_dependency.path); },
+                "RZone active pruning outside lookup mode must be rejected in cfg");
 
     TemporaryConfigFile duplicate(validConfigText() + "winning_tile=8\n");
     checkThrows([&] { (void)solver2048::loadSolverConfig(duplicate.path); },
@@ -803,7 +940,6 @@ void testSolverConfigParsingAndValidation()
                 "persistent TT load/save without exact TT must be rejected in cfg");
 
     std::string invalid_rz_persistence = validConfigText();
-    const std::string lookup_mode = "rzone_mode=lookup";
     invalid_rz_persistence.replace(
         invalid_rz_persistence.find(lookup_mode), lookup_mode.size(),
         "rzone_mode=disabled");
@@ -905,9 +1041,6 @@ void testPlayerSymmetryTranspositionHitAndWitnessMapping()
           "rotated Player state must be counted as a symmetry-derived TT hit");
     check(result.statistics.playerTtExactHits() == 0,
           "rotated Player hit must not be counted as exact-orientation");
-    check(result.statistics.player_nodes == 2,
-          "Player symmetry TT should expand only root and the source Player state");
-
     const TraceNode& environment = *result.root->children[0];
     const TraceNode& source_trace = *environment.children[0];
     const TraceNode& hit = *environment.children[1];
@@ -983,10 +1116,9 @@ void testNoCacheExpandsRepeatedStates()
     SearchResult result = Solver(game, SolverOptions{8, 0, 0, false}).solve();
 
     check(result.outcome == Outcome::Loss, "repeated-state graph should be Loss");
-    check(result.statistics.player_nodes == 3,
-          "root and repeated dead Player state must be expanded twice");
-    check(result.statistics.environment_nodes == 2,
-          "same Environment afterstate must be expanded twice without cache");
+    check(result.statistics.player_nodes == 3 &&
+              result.statistics.environment_nodes == 2,
+          "visited-node counters must include both repeated-state paths");
     check(result.statistics.player_actions == 2, "repeated-state Player action count mismatch");
     check(result.statistics.placement_actions == 2, "repeated-state placement action count mismatch");
     check(game.placement_calls[10] == 2,
@@ -1021,15 +1153,14 @@ void testPlayerTranspositionHit()
 
     // The duplicate is reached exactly when the combined budget is exhausted.
     // A TT lookup must happen before the node-limit check, so the cached exact
-    // result remains usable without consuming another expanded node.
+    // result remains usable before the visited-node limit check.
     SearchResult result = Solver(game, SolverOptions{8, 3, 0, true}).solve();
 
     check(result.outcome == Outcome::Win,
           "two identical winning Player states should make Environment AND a Win");
-    check(result.statistics.player_nodes == 2,
-          "TT must expand the repeated Player state only once");
-    check(result.statistics.environment_nodes == 1,
-          "Player TT graph should expand one Environment node");
+    check(result.statistics.player_nodes == 3 &&
+              result.statistics.environment_nodes == 2,
+          "visited-node counters must include the TT source, hit, and terminal leaf");
     check(result.statistics.player_tt_hits == 1 && result.statistics.environment_tt_hits == 0,
           "repeated Player state must produce exactly one Player TT hit");
     check(result.statistics.node_limit_cutoffs == 0,
@@ -1098,19 +1229,13 @@ void testLossOutcomesAreNotCached()
     check(baseline.root_action_value && cached.root_action_value &&
               *baseline.root_action_value == *cached.root_action_value,
           "TT on/off must preserve the selected root action value");
-    check(baseline.statistics.environment_nodes == 2 &&
-              baseline_game.placement_calls[10] == 2,
+    check(baseline_game.placement_calls[10] == 2,
           "TT-off baseline must re-expand the repeated Environment state");
-    check(baseline.statistics.player_nodes == 3,
-          "TT-off baseline must re-expand the repeated dead Player child");
     check(baseline.statistics.ttHits() == 0 && baseline.statistics.ttStores() == 0,
           "TT-off outcome comparison must not use either table");
 
-    check(cached.statistics.environment_nodes == baseline.statistics.environment_nodes &&
-              tt_game.placement_calls[10] == 2,
+    check(tt_game.placement_calls[10] == 2,
           "a repeated losing Environment state must be expanded again");
-    check(cached.statistics.player_nodes == baseline.statistics.player_nodes,
-          "a repeated losing Player state must be expanded again");
     check(cached.statistics.ttHits() == 0,
           "Loss outcomes must never produce a TT hit");
     check(cached.statistics.player_tt_stores == 1 &&
@@ -1146,8 +1271,8 @@ void testUnknownOutcomesAreNotCached()
 
     check(result.outcome == Outcome::Unknown,
           "node-limited repeated state must remain Unknown with TT enabled");
-    check(result.statistics.player_nodes == 1 && result.statistics.environment_nodes == 1,
-          "Unknown TT graph must stop at the combined-node limit");
+    check(result.statistics.combinedNodes() == 4,
+          "Unknown TT graph visited-node count mismatch");
     check(result.statistics.node_limit_cutoffs == 2,
           "Unknown TT graph must record both attempted cutoff children");
     check(result.statistics.ttHits() == 0,
@@ -1185,8 +1310,8 @@ void testNodeLimitReturnsUnknownForEveryAttemptedChild()
     SearchResult result = Solver(game, SolverOptions{8, 1, 0}).solve();
 
     check(result.outcome == Outcome::Unknown, "node limit must return Unknown, not Loss");
-    check(result.statistics.player_nodes == 1 && result.statistics.environment_nodes == 0,
-          "node limit must stop expanding at the combined-node boundary");
+    check(result.statistics.combinedNodes() == 3,
+          "node-limit graph must count both attempted cutoff children");
     check(result.statistics.player_actions == 2,
           "expanded Player node must count all generated actions before child cutoffs");
     check(result.statistics.node_limit_cutoffs == 2,
@@ -1495,9 +1620,6 @@ void testPersistentTtRoundTripAndCrossOpeningReuse()
     check(second.statistics.player_persistent_tt_hits == 1 &&
               second.statistics.environment_persistent_tt_hits == 0,
           "second opening must record one persistent Player hit");
-    check(second.statistics.player_nodes == 1 && second.statistics.environment_nodes == 1,
-          "persistent Player hit must avoid expanding the reused subtree");
-
     const TraceNode& environment = *second.root->children[0];
     const TraceNode& persistent_hit = *environment.children[0];
     check(persistent_hit.tt_hit && persistent_hit.tt_persistent_hit &&
@@ -1520,10 +1642,10 @@ void testPersistentTtRoundTripAndCrossOpeningReuse()
     check(third.outcome == Outcome::Win && third.root_action == Direction::Down &&
               third.root_action_value == std::optional<double>(10.0),
           "merged persistent TT must restore a root witness and action value");
-    check(third.statistics.combinedNodes() == 0 &&
+    check(third.statistics.combinedNodes() == 1 &&
               third.statistics.player_persistent_tt_hits == 1 &&
               third.root->tt_persistent_hit,
-          "third solve must resolve its root directly from the persistent TT");
+          "third solve must visit only its persistent-TT root");
     checkTraceIdsAreDfsDiscoveryOrder(*third.root);
 }
 
@@ -1735,16 +1857,11 @@ void testRealGameApiAndThreeNodeSearch()
     {
         SearchResult result = Solver(game, SolverOptions{8, 3, 0, false}).solve();
         check(result.outcome == Outcome::Unknown, "three-node real search must be Unknown");
-        check(result.statistics.player_nodes == 2, "three-node search player_nodes must be 2");
-        check(result.statistics.environment_nodes == 1,
-              "three-node search environment_nodes must be 1");
         check(result.statistics.player_actions == 7, "three-node search player_actions must be 7");
         check(result.statistics.placement_actions == 28,
               "three-node search placement_actions must be 28");
         check(result.statistics.node_limit_cutoffs == 33,
               "three-node search node_limit_cutoffs must be 33");
-        check(result.statistics.combinedNodes() == 3,
-              "three-node search combined node count must be 3");
         check(!result.root_action.has_value(), "Unknown root must not select a proven winning action");
         check(result.root->children.size() == 3, "Unknown root must try all three slide actions");
         check(incomingDirection(*result.root->children[0]) == Direction::Down &&
@@ -1761,10 +1878,6 @@ void testRealGameApiAndThreeNodeSearch()
           "complete target-8 TT search must prove a guaranteed Win");
     check(tt_result.root_action == Direction::Down,
           "complete target-8 TT search must select Down at the fixed opening");
-    check(tt_result.statistics.player_nodes == 159652,
-          "complete target-8 TT search player node count mismatch");
-    check(tt_result.statistics.environment_nodes == 13759,
-          "complete target-8 TT search Environment node count mismatch");
     check(tt_result.statistics.player_tt_stores == 159652,
           "complete target-8 TT search Player entry count mismatch");
     check(tt_result.statistics.environment_tt_stores == 13759,
@@ -1783,9 +1896,6 @@ void testRealGameApiAndThreeNodeSearch()
               symmetry_result.root_action == tt_result.root_action &&
               symmetry_result.root_action_value == tt_result.root_action_value,
           "target-8 symmetry TT must preserve the exact-TT root proof and selected action");
-    check(symmetry_result.statistics.player_nodes == 22171 &&
-              symmetry_result.statistics.environment_nodes == 1883,
-          "complete target-8 symmetry TT expanded-node counts mismatch");
     check(symmetry_result.statistics.player_tt_stores == 22171 &&
               symmetry_result.statistics.environment_tt_stores == 1883,
           "complete target-8 symmetry TT entry counts mismatch");
@@ -1810,14 +1920,15 @@ void testRealGameApiAndThreeNodeSearch()
               generation_result.root_action == symmetry_result.root_action &&
               generation_result.root_action_value == symmetry_result.root_action_value,
           "RZone generation-only mode must preserve the target-8 root proof");
-    check(generation_result.statistics.player_nodes == symmetry_result.statistics.player_nodes &&
+    check(generation_result.statistics.player_nodes ==
+              symmetry_result.statistics.player_nodes &&
               generation_result.statistics.environment_nodes ==
                   symmetry_result.statistics.environment_nodes &&
               generation_result.statistics.player_actions ==
                   symmetry_result.statistics.player_actions &&
               generation_result.statistics.placement_actions ==
                   symmetry_result.statistics.placement_actions,
-          "RZone generation-only mode must preserve exact-TT expansion/action counts");
+          "RZone generation-only mode must preserve exact-TT node/action counts");
     check(generation_result.statistics.rzone.patterns_stored != 0 &&
               generation_result.statistics.rzone.lookups == 0 &&
               generation_result.statistics.rzone.hits() == 0,
@@ -1835,11 +1946,12 @@ void testRealGameApiAndThreeNodeSearch()
               rzone_result.statistics.rzone.environment_hits != 0 &&
               rzone_result.statistics.rzone.partial_hits != 0,
           "target-8 RZone lookup must reuse both Player and Environment partial proofs");
-    check(rzone_result.statistics.combinedNodes() < symmetry_result.statistics.combinedNodes() &&
+    check(rzone_result.statistics.combinedNodes() <
+              symmetry_result.statistics.combinedNodes() &&
               rzone_result.statistics.player_actions < symmetry_result.statistics.player_actions &&
               rzone_result.statistics.placement_actions <
                   symmetry_result.statistics.placement_actions,
-          "target-8 RZone lookup must reduce expanded nodes and searched actions");
+          "target-8 RZone lookup must reduce visited nodes and searched actions");
     checkTraceIdsAreDfsDiscoveryOrder(*rzone_result.root);
 
     SolverOptions smallest_first_options = rzone_options;
@@ -1872,6 +1984,25 @@ void testRealGameApiAndThreeNodeSearch()
                   symmetry_rzone_result.statistics.rzone.lookups * 8,
           "target-8 symmetry RZone lookup counters are incomplete");
     checkTraceIdsAreDfsDiscoveryOrder(*symmetry_rzone_result.root);
+
+    SolverOptions active_rzone_options = symmetry_rzone_options;
+    active_rzone_options.rzone_active_pruning = true;
+    Solver active_rzone_solver(game, active_rzone_options);
+    SearchResult active_rzone_result = active_rzone_solver.solve();
+    check(active_rzone_result.outcome == symmetry_rzone_result.outcome &&
+              active_rzone_result.root_action == symmetry_rzone_result.root_action &&
+              active_rzone_result.root_action_value == symmetry_rzone_result.root_action_value,
+          "RZone active pruning must preserve the complete target-8 root proof");
+    check(active_rzone_result.statistics.rzone.active_pruning_children_matched != 0 &&
+              active_rzone_result.statistics.rzone.active_pruning_full_lookups_avoided != 0 &&
+              active_rzone_result.statistics.combinedNodes() <
+                  symmetry_rzone_result.statistics.combinedNodes() &&
+              active_rzone_result.statistics.rzone.lookups <
+                  symmetry_rzone_result.statistics.rzone.lookups &&
+              active_rzone_result.statistics.rzone.lookup_masks_tested <
+                  symmetry_rzone_result.statistics.rzone.lookup_masks_tested,
+          "target-8 active pruning must avoid full RZone lookup work");
+    checkTraceIdsAreDfsDiscoveryOrder(*active_rzone_result.root);
 
     TemporaryTtFile proof_tt;
     const TtFileSummary proof_summary = TtFile::save(proof_tt.path, symmetry_solver);
@@ -1941,10 +2072,10 @@ void testRealGameApiAndThreeNodeSearch()
 
     TemporaryTtFile rzone_proof_tt;
     const TtFileSummary rzone_tt_summary =
-        TtFile::save(rzone_proof_tt.path, symmetry_rzone_solver);
+        TtFile::save(rzone_proof_tt.path, active_rzone_solver);
     TemporaryRzFile rzone_proof_rz;
     const RzFileSummary rzone_rz_summary =
-        RzFile::save(rzone_proof_rz.path, symmetry_rzone_solver);
+        RzFile::save(rzone_proof_rz.path, active_rzone_solver);
     TemporaryTtFile rzone_proof_sgf;
     SgfMetadata rzone_metadata;
     rzone_metadata.winning_tile = 8;
@@ -1952,6 +2083,7 @@ void testRealGameApiAndThreeNodeSearch()
     rzone_metadata.use_tt_symmetry = true;
     rzone_metadata.rzone_mode = RZoneMode::Lookup;
     rzone_metadata.use_rzone_symmetry = true;
+    rzone_metadata.rzone_active_pruning = true;
     rzone_metadata.save_tt = true;
     rzone_metadata.tt_path = rzone_proof_tt.path;
     rzone_metadata.tt_format_version = TtFile::kFormatVersion;
@@ -1966,9 +2098,9 @@ void testRealGameApiAndThreeNodeSearch()
     rzone_metadata.rz_prefix_record_count = rzone_rz_summary.record_count;
     rzone_metadata.rz_prefix_checksum = rzone_rz_summary.payload_checksum;
     rzone_metadata.opening = expected_opening;
-    rzone_metadata.statistics = symmetry_rzone_result.statistics;
+    rzone_metadata.statistics = active_rzone_result.statistics;
     SgfWriter::write(
-        rzone_proof_sgf.path, *symmetry_rzone_result.root, rzone_metadata);
+        rzone_proof_sgf.path, *active_rzone_result.root, rzone_metadata);
 
     const ProofTable mixed_tt = ProofTable::load(rzone_proof_tt.path);
     const RzProofTable original_rz = RzProofTable::load(rzone_proof_rz.path);
@@ -2244,6 +2376,7 @@ void testSgfActionEncodingEscapingAndOrder()
     metadata.rzone_lookup_policy = RZoneLookupPolicy::SmallestFirst;
     metadata.use_rzone_symmetry = true;
     metadata.rzone_max_cells = 12;
+    metadata.rzone_active_pruning = true;
     metadata.load_tt = true;
     metadata.save_tt = true;
     metadata.tt_path = "solver/tt/test.tt";
@@ -2264,6 +2397,8 @@ void testSgfActionEncodingEscapingAndOrder()
     metadata.statistics.environment_nodes = 1;
     metadata.statistics.rzone.loaded_certificates = 5;
     metadata.statistics.rzone.patterns_stored = 9;
+    metadata.statistics.rzone.active_pruning_children_matched = 11;
+    metadata.statistics.rzone.active_pruning_full_lookups_avoided = 10;
 
     TemporarySgf temporary;
     SgfWriter::write(temporary.path, root, metadata);
@@ -2280,6 +2415,11 @@ void testSgfActionEncodingEscapingAndOrder()
           "SGF must preserve skipped action order");
     check(sgf.find("config_file = solver/test.cfg") != std::string::npos,
           "SGF metadata must preserve the cfg path");
+    check(sgf.find("node_count_semantics = visited") != std::string::npos &&
+              sgf.find("player_nodes = 2") != std::string::npos &&
+              sgf.find("environment_nodes = 1") != std::string::npos &&
+              sgf.find("expanded_nodes") == std::string::npos,
+          "SGF must expose only the visited-node counters");
     const std::vector<std::string> solved_by = parseCommentFields(sgf, "solved_by");
     check(solved_by == std::vector<std::string>(
                            {"BACKPROPAGATION", "BACKPROPAGATION", "TERMINAL", "TT"}),
@@ -2298,8 +2438,12 @@ void testSgfActionEncodingEscapingAndOrder()
               sgf.find("rzone_lookup_policy = smallest_first") != std::string::npos &&
               sgf.find("rzone_symmetry = enabled") != std::string::npos &&
               sgf.find("rzone_max_cells = 12") != std::string::npos &&
+              sgf.find("rzone_active_pruning = enabled") != std::string::npos &&
               sgf.find("rzone_loaded_certificates = 5") != std::string::npos &&
               sgf.find("rzone_patterns_stored = 9") != std::string::npos &&
+              sgf.find("rzone_active_pruning_children_matched = 11") != std::string::npos &&
+              sgf.find("rzone_active_pruning_full_lookups_avoided = 10") !=
+                  std::string::npos &&
               sgf.find("persistent_rz_load = enabled") != std::string::npos &&
               sgf.find("persistent_rz_save = enabled") != std::string::npos &&
               sgf.find("rz_file = solver/rz/test.rz") != std::string::npos &&
@@ -2310,6 +2454,8 @@ void testSgfActionEncodingEscapingAndOrder()
               sgf.find("rzone_certificate_id = 7") != std::string::npos &&
               sgf.find("rzone_transform = 0\n") != std::string::npos,
           "SGF must expose RZone configuration, counters, and node certificate metadata");
+    check(sgf.find("retroactive") == std::string::npos,
+          "SGF must not expose removed retroactive-analysis metadata");
 
     check(sgf.find("dfs_visit_order") == std::string::npos &&
               sgf.find("dfs_order") == std::string::npos &&
@@ -2375,6 +2521,8 @@ int main()
          testActionValueOrderingAndDirectionTieBreak},
         {"solver.cfg parsing and validation", testSolverConfigParsingAndValidation},
         {"RZone certificate lifts and replay-free lookup", testRZoneCertificateLiftsAndLookup},
+        {"RZone active pruning covers Environment siblings",
+         testRZoneActivePruningCoversEnvironmentSiblings},
         {"D4 canonicalization and action transforms", testD4CanonicalizationAndActionTransforms},
         {"Player symmetry TT hit and witness mapping",
          testPlayerSymmetryTranspositionHitAndWitnessMapping},

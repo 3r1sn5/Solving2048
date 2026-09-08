@@ -94,7 +94,9 @@ CommandLine parseCommandLine(int argc, char** argv)
                              option == "--rzone-symmetry" ||
                              option == "--no-rzone-symmetry" ||
                              option == "--rzone-shadow-exact-check" ||
-                             option == "--no-rzone-shadow-exact-check";
+                             option == "--no-rzone-shadow-exact-check" ||
+                             option == "--rzone-active-pruning" ||
+                             option == "--no-rzone-active-pruning";
         if (!takes_value && !is_flag) throw std::invalid_argument("unknown option: " + option);
         if (!takes_value) continue;
         if (++index >= argc) throw std::invalid_argument("missing value after " + option);
@@ -164,6 +166,10 @@ CommandLine parseCommandLine(int argc, char** argv)
             command.settings.rzone_shadow_exact_check = true;
         } else if (option == "--no-rzone-shadow-exact-check") {
             command.settings.rzone_shadow_exact_check = false;
+        } else if (option == "--rzone-active-pruning") {
+            command.settings.rzone_active_pruning = true;
+        } else if (option == "--no-rzone-active-pruning") {
+            command.settings.rzone_active_pruning = false;
         } else if (option == "--load-rz") {
             command.settings.load_rz = true;
         } else if (option == "--no-load-rz") {
@@ -194,8 +200,8 @@ void printHelp(const char* program)
         << "Options:\n"
         << "  --config PATH          Configuration file (default: " << config::kDefaultConfigPath << ")\n"
         << "  --winning-tile N       Override target tile from cfg\n"
-        << "  --node-limit N         Override combined expanded-node limit; 0 is unlimited\n"
-        << "  --progress-interval N  Print progress every N expanded nodes; 0 disables\n"
+        << "  --node-limit N         Override combined visited-node limit; 0 is unlimited\n"
+        << "  --progress-interval N  Print progress every N visited nodes; 0 disables\n"
         << "  --tt / --no-tt         Override exact transposition-table mode\n"
         << "  --tt-symmetry           Canonicalize TT keys over all 8 D4 symmetries\n"
         << "  --no-tt-symmetry        Use exact board orientation\n"
@@ -210,6 +216,7 @@ void printHelp(const char* program)
         << "  --save-rz / --no-save-rz  Save or skip the merged persistent RZone snapshot\n"
         << "  --rz-file PATH          Override persistent RZone file path\n"
         << "  --rzone-shadow-exact-check / --no-rzone-shadow-exact-check\n"
+        << "  --rzone-active-pruning / --no-rzone-active-pruning\n"
         << "  --network NAME         Override N-tuple network\n"
         << "  --model PATH           Override N-tuple weight file\n"
         << "  --sgf PATH             Override final SGF output path\n"
@@ -255,6 +262,7 @@ int main(int argc, char** argv)
         options.use_rzone_symmetry = settings.use_rzone_symmetry;
         options.rzone_max_cells = settings.rzone_max_cells;
         options.rzone_shadow_exact_check = settings.rzone_shadow_exact_check;
+        options.rzone_active_pruning = settings.rzone_active_pruning;
 
         std::cout << "configuration: " << command.config_path.string() << '\n';
         std::cout << "fixed opening (Player to move):\n";
@@ -282,6 +290,8 @@ int main(int argc, char** argv)
                   << "RZone file: " << settings.rz_path.string() << '\n'
                   << "RZone shadow exact check: "
                   << (settings.rzone_shadow_exact_check ? "enabled" : "disabled") << '\n'
+                  << "RZone active pruning: "
+                  << (settings.rzone_active_pruning ? "enabled" : "disabled") << '\n'
                   << "network: " << settings.network << '\n'
                   << "model: " << settings.model_path << '\n'
                   << "SGF output: " << settings.sgf_path.string() << '\n';
@@ -289,9 +299,9 @@ int main(int argc, char** argv)
         auto started = std::chrono::steady_clock::now();
         Solver solver(game, options, [&](const SearchStatistics& statistics) {
             const auto elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
-            std::cerr << "progress: nodes=" << statistics.combinedNodes()
-                      << " player=" << statistics.player_nodes
-                      << " environment=" << statistics.environment_nodes
+            std::cerr << "progress: visited=" << statistics.combinedNodes()
+                      << " player_visited=" << statistics.player_nodes
+                      << " environment_visited=" << statistics.environment_nodes
                       << " tt_hits=" << statistics.ttHits()
                       << " rzone_hits=" << statistics.rzone.hits()
                       << " elapsed=" << std::fixed << std::setprecision(3) << elapsed << "s\n";
@@ -378,6 +388,7 @@ int main(int argc, char** argv)
         metadata.use_rzone_symmetry = settings.use_rzone_symmetry;
         metadata.rzone_max_cells = settings.rzone_max_cells;
         metadata.rzone_shadow_exact_check = settings.rzone_shadow_exact_check;
+        metadata.rzone_active_pruning = settings.rzone_active_pruning;
         metadata.load_tt = settings.load_tt;
         metadata.save_tt = settings.save_tt;
         metadata.tt_path = settings.tt_path;
@@ -414,9 +425,9 @@ int main(int argc, char** argv)
                           << *result.root_action_value << '\n';
             }
         }
-        std::cout << "player nodes: " << result.statistics.player_nodes << '\n'
-                  << "environment nodes: " << result.statistics.environment_nodes << '\n'
-                  << "combined nodes: " << result.statistics.combinedNodes() << '\n'
+        std::cout << "player nodes visited: " << result.statistics.player_nodes << '\n'
+                  << "environment nodes visited: " << result.statistics.environment_nodes << '\n'
+                  << "combined nodes visited: " << result.statistics.combinedNodes() << '\n'
                   << "player actions: " << result.statistics.player_actions << '\n'
                   << "placement actions: " << result.statistics.placement_actions << '\n'
                   << "node-limit cutoffs: " << result.statistics.node_limit_cutoffs << '\n';
@@ -468,7 +479,22 @@ int main(int argc, char** argv)
                       << rzone.symmetry_hits << '\n'
                       << "RZone transforms tested: " << rzone.lookup_transforms_tested << '\n'
                       << "RZone partial/full hits: " << rzone.partial_hits << '/'
-                      << rzone.full_board_hits << '\n';
+                      << rzone.full_board_hits << '\n'
+                      << "RZone active-pruning AND nodes: "
+                      << rzone.active_pruning_and_nodes << '\n'
+                      << "RZone active-pruning certificates tested: "
+                      << rzone.active_pruning_certificates_tested << '\n'
+                      << "RZone active-pruning transform tests: "
+                      << rzone.active_pruning_transform_tests << '\n'
+                      << "RZone active-pruning children matched: "
+                      << rzone.active_pruning_children_matched << '\n'
+                      << "RZone active-pruning full lookups avoided: "
+                      << rzone.active_pruning_full_lookups_avoided << '\n'
+                      << "RZone active-pruning AND nodes closed: "
+                      << rzone.active_pruning_and_nodes_closed << '\n'
+                      << "RZone active-pruning universal lifts: "
+                      << rzone.active_pruning_universal_lift_successes << '/'
+                      << rzone.active_pruning_universal_lift_attempts << '\n';
         }
         if (saved_tt) {
             std::cout << "saved persistent TT: entries=" << saved_tt->entries()

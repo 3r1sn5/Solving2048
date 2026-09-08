@@ -99,6 +99,9 @@ struct TraceNode {
 };
 
 struct SearchStatistics {
+    // Nodes entered by the DFS control flow, including terminal, TT, RZone,
+    // and node-limit leaves. Parent-level active-pruned proof leaves are not
+    // visited search nodes even though they remain in the SGF trace.
     std::uint64_t player_nodes = 0;
     std::uint64_t environment_nodes = 0;
     std::uint64_t player_actions = 0;
@@ -148,6 +151,7 @@ struct SolverOptions {
     bool use_rzone_symmetry = false;
     unsigned rzone_max_cells = 16;
     bool rzone_shadow_exact_check = false;
+    bool rzone_active_pruning = false;
 };
 
 struct SearchResult {
@@ -188,9 +192,12 @@ private:
     Outcome solvePlayer(Board board, TraceNode& trace);
     Outcome solveEnvironment(Board afterstate, TraceNode& trace);
     void assignTraceId(TraceNode& trace);
+    void visitedNode(Phase phase);
     bool lookupPlayerTransposition(Board board, TraceNode& trace);
     bool lookupEnvironmentTransposition(Board afterstate, TraceNode& trace);
     bool lookupRZone(Board board, Phase phase, TraceNode& trace);
+    void resolveRZoneMatch(
+        Board board, Phase phase, const RZoneMatch& match, TraceNode& trace);
     void annotateRZone(
         TraceNode& trace,
         RZoneCertificateId id,
@@ -207,7 +214,6 @@ private:
     static SearchAction transformAction(const SearchAction& action, std::uint8_t transform);
     double selectedSlideActionValue(Board board, Direction direction) const;
     bool atNodeLimit() const;
-    void expandedNode();
 
     const Game& game_;
     SolverOptions options_;

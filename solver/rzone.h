@@ -79,6 +79,14 @@ struct RZoneStatistics {
     std::uint64_t lookup_transforms_tested = 0;
     std::uint64_t partial_hits = 0;
     std::uint64_t full_board_hits = 0;
+    std::uint64_t active_pruning_and_nodes = 0;
+    std::uint64_t active_pruning_certificates_tested = 0;
+    std::uint64_t active_pruning_transform_tests = 0;
+    std::uint64_t active_pruning_children_matched = 0;
+    std::uint64_t active_pruning_full_lookups_avoided = 0;
+    std::uint64_t active_pruning_and_nodes_closed = 0;
+    std::uint64_t active_pruning_universal_lift_attempts = 0;
+    std::uint64_t active_pruning_universal_lift_successes = 0;
 
     std::uint64_t hits() const { return player_hits + environment_hits; }
 };
@@ -101,8 +109,22 @@ public:
         RZoneCertificateId child);
 
     std::optional<RZoneMatch> lookup(Board board, Phase phase);
+    std::optional<RZoneMatch> matchCertificate(
+        Board board,
+        Phase phase,
+        RZoneCertificateId id,
+        std::optional<std::uint8_t> preferred_transform = std::nullopt);
     const RZoneCertificate* find(RZoneCertificateId id) const;
 
+    void recordActivePruningAndNode() { ++statistics_.active_pruning_and_nodes; }
+    void recordActivePruningHit(Phase phase, const RZoneMatch& match);
+    void recordActivePruningAndNodeClosed() {
+        ++statistics_.active_pruning_and_nodes_closed;
+    }
+    void recordActivePruningUniversalLift(bool success) {
+        ++statistics_.active_pruning_universal_lift_attempts;
+        if (success) ++statistics_.active_pruning_universal_lift_successes;
+    }
     const RZoneStatistics& statistics() const { return statistics_; }
     std::size_t size() const { return certificates_.size(); }
     unsigned winningTile() const { return winning_tile_; }
@@ -144,6 +166,11 @@ private:
         const RZoneCertificate* certificate,
         Phase phase,
         std::uint8_t transform);
+    std::optional<RZoneMatch> matchCertificateImpl(
+        Board board,
+        Phase phase,
+        RZoneCertificateId id,
+        std::optional<std::uint8_t> preferred_transform);
     static std::uint64_t expandNibbleMask(std::uint16_t mask);
 
     const Game& game_;

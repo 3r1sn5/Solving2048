@@ -44,6 +44,7 @@ std::string nodeComment(const TraceNode& node, const SgfMetadata* metadata)
     if (metadata) {
         comment << "winning_tile = " << metadata->winning_tile
                 << '\n' << "node_limit = " << metadata->node_limit
+                << '\n' << "node_count_semantics = visited"
                 << '\n' << "transposition_table = "
                 << (metadata->use_transposition_table ? "enabled" : "disabled")
                 << '\n' << "tt_symmetry = "
@@ -56,6 +57,8 @@ std::string nodeComment(const TraceNode& node, const SgfMetadata* metadata)
                 << '\n' << "rzone_max_cells = " << metadata->rzone_max_cells
                 << '\n' << "rzone_shadow_exact_check = "
                 << (metadata->rzone_shadow_exact_check ? "enabled" : "disabled")
+                << '\n' << "rzone_active_pruning = "
+                << (metadata->rzone_active_pruning ? "enabled" : "disabled")
                 << '\n' << "persistent_tt_load = "
                 << (metadata->load_tt ? "enabled" : "disabled")
                 << '\n' << "persistent_tt_save = "
@@ -130,7 +133,23 @@ std::string nodeComment(const TraceNode& node, const SgfMetadata* metadata)
                 << metadata->statistics.rzone.lookup_transforms_tested
                 << '\n' << "rzone_partial_hits = " << metadata->statistics.rzone.partial_hits
                 << '\n' << "rzone_full_board_hits = "
-                << metadata->statistics.rzone.full_board_hits;
+                << metadata->statistics.rzone.full_board_hits
+                << '\n' << "rzone_active_pruning_and_nodes = "
+                << metadata->statistics.rzone.active_pruning_and_nodes
+                << '\n' << "rzone_active_pruning_certificates_tested = "
+                << metadata->statistics.rzone.active_pruning_certificates_tested
+                << '\n' << "rzone_active_pruning_transform_tests = "
+                << metadata->statistics.rzone.active_pruning_transform_tests
+                << '\n' << "rzone_active_pruning_children_matched = "
+                << metadata->statistics.rzone.active_pruning_children_matched
+                << '\n' << "rzone_active_pruning_full_lookups_avoided = "
+                << metadata->statistics.rzone.active_pruning_full_lookups_avoided
+                << '\n' << "rzone_active_pruning_and_nodes_closed = "
+                << metadata->statistics.rzone.active_pruning_and_nodes_closed
+                << '\n' << "rzone_active_pruning_universal_lift_attempts = "
+                << metadata->statistics.rzone.active_pruning_universal_lift_attempts
+                << '\n' << "rzone_active_pruning_universal_lift_successes = "
+                << metadata->statistics.rzone.active_pruning_universal_lift_successes;
         if (metadata->tt_format_version) {
             comment << '\n' << "tt_format_version = " << *metadata->tt_format_version;
         }

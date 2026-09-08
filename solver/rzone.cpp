@@ -350,6 +350,68 @@ std::optional<RZoneMatch> RZoneTable::lookup(Board board, Phase phase)
     return lookupFullScan(candidates, transform_count, phase);
 }
 
+std::optional<RZoneMatch> RZoneTable::matchCertificate(
+    Board board,
+    Phase phase,
+    RZoneCertificateId id,
+    std::optional<std::uint8_t> preferred_transform)
+{
+    return matchCertificateImpl(board, phase, id, preferred_transform);
+}
+
+std::optional<RZoneMatch> RZoneTable::matchCertificateImpl(
+    Board board,
+    Phase phase,
+    RZoneCertificateId id,
+    std::optional<std::uint8_t> preferred_transform)
+{
+    ++statistics_.active_pruning_certificates_tested;
+    const RZoneCertificate* certificate = find(id);
+    if (!certificate || !certificate->validated || certificate->phase != phase ||
+        certificate->winning_tile != winning_tile_) {
+        return std::nullopt;
+    }
+    if (preferred_transform && *preferred_transform >= 8) {
+        throw std::invalid_argument("preferred RZone transform must be in [0, 7]");
+    }
+
+    std::array<std::uint8_t, 8> transforms{};
+    unsigned transform_count = 0;
+    auto append_transform = [&](std::uint8_t transform) {
+        if (!use_symmetry_ && transform != 0) return;
+        for (unsigned index = 0; index < transform_count; ++index) {
+            if (transforms[index] == transform) return;
+        }
+        transforms[transform_count++] = transform;
+    };
+    if (preferred_transform) append_transform(*preferred_transform);
+    const unsigned available_transforms = use_symmetry_ ? 8 : 1;
+    for (unsigned transform = 0; transform < available_transforms; ++transform) {
+        append_transform(static_cast<std::uint8_t>(transform));
+    }
+
+    for (unsigned index = 0; index < transform_count; ++index) {
+        const std::uint8_t transform = transforms[index];
+        ++statistics_.active_pruning_transform_tests;
+        const Board candidate = transform == 0 ? board : transformBoard(board, transform);
+        if (maskedBoard(candidate, certificate->mask) != certificate->masked_board) continue;
+        ++statistics_.active_pruning_children_matched;
+        return RZoneMatch{certificate->id, transform};
+    }
+    return std::nullopt;
+}
+
+void RZoneTable::recordActivePruningHit(Phase phase, const RZoneMatch& match)
+{
+    const RZoneCertificate* certificate = find(match.id);
+    if (!certificate || !certificate->validated || certificate->phase != phase ||
+        certificate->winning_tile != winning_tile_ || match.transform >= 8) {
+        throw std::logic_error("attempted to record an invalid active-pruning RZone hit");
+    }
+    ++statistics_.active_pruning_full_lookups_avoided;
+    (void)recordLookupHit(certificate, phase, match.transform);
+}
+
 std::optional<RZoneMatch> RZoneTable::recordLookupHit(
     const RZoneCertificate* certificate,
     Phase phase,

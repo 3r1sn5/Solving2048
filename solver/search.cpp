@@ -69,6 +69,9 @@ Solver::Solver(const Game& game, SolverOptions options, ProgressCallback progres
     if (options_.rzone_shadow_exact_check && !options_.use_transposition_table) {
         throw std::invalid_argument("RZone shadow exact check requires exact TT");
     }
+    if (options_.rzone_active_pruning && options_.rzone_mode != RZoneMode::Lookup) {
+        throw std::invalid_argument("RZone active pruning requires lookup mode");
+    }
 }
 
 SearchResult Solver::solve()
@@ -139,18 +142,24 @@ bool Solver::lookupRZone(Board board, Phase phase, TraceNode& trace)
     if (options_.rzone_mode != RZoneMode::Lookup) return false;
     const std::optional<RZoneMatch> match = rzone_table_.lookup(board, phase);
     if (!match) return false;
+    resolveRZoneMatch(board, phase, *match, trace);
+    return true;
+}
+
+void Solver::resolveRZoneMatch(
+    Board board, Phase phase, const RZoneMatch& match, TraceNode& trace)
+{
     validateRZoneAgainstExact(board, phase);
     trace.outcome = Outcome::Win;
     trace.terminal_reason = TerminalReason::None;
     trace.solved_by = SolvedBy::RZoneTable;
-    annotateRZone(trace, match->id, true, match->transform);
-    const RZoneCertificate* certificate = rzone_table_.find(match->id);
+    annotateRZone(trace, match.id, true, match.transform);
+    const RZoneCertificate* certificate = rzone_table_.find(match.id);
     if (phase == Phase::Player && certificate && certificate->slide) {
         trace.selected_action = SearchAction::slide(transformDirection(
             *certificate->slide,
-            inverseTransform(match->transform)));
+            inverseTransform(match.transform)));
     }
-    return true;
 }
 
 void Solver::liftPlayerRZone(
@@ -203,7 +212,22 @@ void Solver::liftEnvironmentRZone(Board board, TraceNode& trace)
 
 void Solver::assignTraceId(TraceNode& trace)
 {
-    if (trace.trace_id == 0) trace.trace_id = ++next_trace_id_;
+    if (trace.trace_id != 0) return;
+    trace.trace_id = ++next_trace_id_;
+}
+
+void Solver::visitedNode(Phase phase)
+{
+    if (phase == Phase::Player) {
+        ++statistics_.player_nodes;
+    } else {
+        ++statistics_.environment_nodes;
+    }
+    if (progress_ && options_.progress_interval != 0 &&
+        statistics_.combinedNodes() % options_.progress_interval == 0) {
+        statistics_.rzone = rzone_table_.statistics();
+        progress_(statistics_);
+    }
 }
 
 CanonicalBoard Solver::transpositionKey(Board board) const
@@ -341,22 +365,15 @@ void Solver::storeEnvironmentTransposition(Board afterstate, const TraceNode& tr
 
 bool Solver::atNodeLimit() const
 {
-    return options_.node_limit != 0 && statistics_.combinedNodes() >= options_.node_limit;
-}
-
-void Solver::expandedNode()
-{
-    if (progress_ && options_.progress_interval != 0 &&
-        statistics_.combinedNodes() % options_.progress_interval == 0) {
-        statistics_.rzone = rzone_table_.statistics();
-        progress_(statistics_);
-    }
+    return options_.node_limit != 0 &&
+           statistics_.combinedNodes() > options_.node_limit;
 }
 
 Outcome Solver::solvePlayer(Board board, TraceNode& trace)
 {
-    assignTraceId(trace);
     trace.phase = Phase::Player;
+    assignTraceId(trace);
+    visitedNode(Phase::Player);
     if (game_.hasWinningTile(board, options_.winning_tile)) {
         trace.outcome = Outcome::Win;
         trace.terminal_reason = TerminalReason::WinningTile;
@@ -376,8 +393,6 @@ Outcome Solver::solvePlayer(Board board, TraceNode& trace)
 
     trace.expanded = true;
     trace.solved_by = SolvedBy::Backpropagation;
-    ++statistics_.player_nodes;
-    expandedNode();
 
     std::vector<OrderedSlide> actions;
     for (const SlideResult& slide : game_.legalSlides(board)) {
@@ -417,6 +432,9 @@ Outcome Solver::solvePlayer(Board board, TraceNode& trace)
 
         Outcome child_outcome;
         if (game_.hasWinningTile(action.slide.afterstate, options_.winning_tile)) {
+            // This terminal child is checked inline instead of entering
+            // solveEnvironment(), but it is still a visited search node.
+            visitedNode(Phase::Environment);
             child->outcome = Outcome::Win;
             child->terminal_reason = TerminalReason::WinningTile;
             child->solved_by = SolvedBy::Terminal;
@@ -448,8 +466,9 @@ Outcome Solver::solvePlayer(Board board, TraceNode& trace)
 
 Outcome Solver::solveEnvironment(Board afterstate, TraceNode& trace)
 {
-    assignTraceId(trace);
     trace.phase = Phase::Environment;
+    assignTraceId(trace);
+    visitedNode(Phase::Environment);
     if (game_.hasWinningTile(afterstate, options_.winning_tile)) {
         trace.outcome = Outcome::Win;
         trace.terminal_reason = TerminalReason::WinningTile;
@@ -469,8 +488,6 @@ Outcome Solver::solveEnvironment(Board afterstate, TraceNode& trace)
 
     trace.expanded = true;
     trace.solved_by = SolvedBy::Backpropagation;
-    ++statistics_.environment_nodes;
-    expandedNode();
 
     const std::vector<PlacementResult> placements = game_.legalPlacements(afterstate);
     if (placements.empty()) {
@@ -480,14 +497,51 @@ Outcome Solver::solveEnvironment(Board afterstate, TraceNode& trace)
     statistics_.placement_actions += placements.size();
 
     bool has_unknown = false;
+    std::vector<std::optional<RZoneMatch>> active_matches(placements.size());
+    std::unordered_set<std::uint64_t> observed_certificates;
+    bool active_pruning_started = false;
+    bool active_pruning_hit_used = false;
+    std::optional<RZoneCertificateId> active_parent_certificate;
+    std::uint8_t active_parent_transform = 0;
+    unsigned active_parent_cells = 17;
+    unsigned active_parent_depth = 0;
+    auto considerActiveParent = [&](RZoneCertificateId id, std::uint8_t transform) {
+        const RZoneCertificate* candidate = rzone_table_.find(id);
+        if (!candidate) return;
+        const unsigned candidate_cells = RZoneTable::countCells(candidate->mask);
+        if (!active_parent_certificate || candidate_cells < active_parent_cells ||
+            (candidate_cells == active_parent_cells &&
+             candidate->depth < active_parent_depth) ||
+            (candidate_cells == active_parent_cells &&
+             candidate->depth == active_parent_depth && id < *active_parent_certificate) ||
+            (candidate_cells == active_parent_cells &&
+             candidate->depth == active_parent_depth && id == *active_parent_certificate &&
+             transform < active_parent_transform)) {
+            active_parent_certificate = id;
+            active_parent_transform = transform;
+            active_parent_cells = candidate_cells;
+            active_parent_depth = candidate->depth;
+        }
+    };
+
     for (std::size_t index = 0; index < placements.size(); ++index) {
         const PlacementResult& placement = placements[index];
         auto child = std::make_unique<TraceNode>();
         child->phase = Phase::Player;
         child->dfs_order = index;
         child->incoming_action = SearchAction::placement(placement.position, placement.tile);
-        const Outcome child_outcome = solvePlayer(placement.board, *child);
+        Outcome child_outcome = Outcome::Unknown;
+        if (options_.rzone_active_pruning && active_matches[index]) {
+            assignTraceId(*child);
+            resolveRZoneMatch(placement.board, Phase::Player, *active_matches[index], *child);
+            rzone_table_.recordActivePruningHit(Phase::Player, *active_matches[index]);
+            active_pruning_hit_used = true;
+            child_outcome = child->outcome;
+        } else {
+            child_outcome = solvePlayer(placement.board, *child);
+        }
         trace.children.push_back(std::move(child));
+        const TraceNode& resolved_child = *trace.children.back();
 
         if (child_outcome == Outcome::Loss) {
             trace.outcome = Outcome::Loss;
@@ -499,11 +553,60 @@ Outcome Solver::solveEnvironment(Board afterstate, TraceNode& trace)
             storeEnvironmentTransposition(afterstate, trace);
             return trace.outcome;
         }
-        if (child_outcome == Outcome::Unknown) has_unknown = true;
+        if (child_outcome == Outcome::Unknown) {
+            has_unknown = true;
+            continue;
+        }
+
+        if (!options_.rzone_active_pruning || !resolved_child.rzone_certificate_id) {
+            continue;
+        }
+        const std::uint8_t source_transform = resolved_child.rzone_transform.value_or(0);
+        const std::uint64_t attempt_key =
+            (static_cast<std::uint64_t>(source_transform) << 32) |
+            *resolved_child.rzone_certificate_id;
+        if (!observed_certificates.insert(attempt_key).second) continue;
+
+        if (!active_pruning_started) {
+            rzone_table_.recordActivePruningAndNode();
+            active_pruning_started = true;
+        }
+
+        const Board stored_parent = source_transform == 0
+            ? afterstate
+            : transformBoard(afterstate, source_transform);
+        const std::optional<RZoneCertificateId> lifted =
+            rzone_table_.liftUniversalPlacement(
+                stored_parent, *resolved_child.rzone_certificate_id);
+        rzone_table_.recordActivePruningUniversalLift(lifted.has_value());
+        if (lifted) considerActiveParent(*lifted, source_transform);
+
+        for (std::size_t sibling = index + 1; sibling < placements.size(); ++sibling) {
+            if (active_matches[sibling] ||
+                game_.hasWinningTile(placements[sibling].board, options_.winning_tile)) {
+                continue;
+            }
+            const std::optional<RZoneMatch> match = rzone_table_.matchCertificate(
+                placements[sibling].board,
+                Phase::Player,
+                *resolved_child.rzone_certificate_id,
+                source_transform);
+            if (match) active_matches[sibling] = *match;
+        }
     }
 
     trace.outcome = has_unknown ? Outcome::Unknown : Outcome::Win;
-    if (trace.outcome == Outcome::Win) liftEnvironmentRZone(afterstate, trace);
+    if (trace.outcome == Outcome::Win) {
+        if (options_.rzone_active_pruning) {
+            if (active_parent_certificate) {
+                annotateRZone(
+                    trace, *active_parent_certificate, false, active_parent_transform);
+            }
+            if (active_pruning_hit_used) rzone_table_.recordActivePruningAndNodeClosed();
+        } else {
+            liftEnvironmentRZone(afterstate, trace);
+        }
+    }
     storeEnvironmentTransposition(afterstate, trace);
     return trace.outcome;
 }

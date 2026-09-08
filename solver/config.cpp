@@ -163,6 +163,9 @@ void validateSolverConfig(const SolverConfig& value)
     if (value.rzone_shadow_exact_check && !value.use_transposition_table) {
         throw std::invalid_argument("rzone_shadow_exact_check=true requires exact TT");
     }
+    if (value.rzone_active_pruning && value.rzone_mode != RZoneMode::Lookup) {
+        throw std::invalid_argument("rzone_active_pruning=true requires rzone_mode=lookup");
+    }
     if ((value.load_rz || value.save_rz) && value.rzone_mode == RZoneMode::Disabled) {
         throw std::invalid_argument(
             "load_rz/save_rz require rzone_mode=generate or rzone_mode=lookup");
@@ -193,7 +196,7 @@ SolverConfig loadSolverConfig(const std::filesystem::path& path)
 
     SolverConfig result;
     std::unordered_set<std::string> seen;
-    static const std::unordered_set<std::string> required = {
+    static const std::unordered_set<std::string> known = {
         "winning_tile",
         "node_limit",
         "progress_interval",
@@ -207,6 +210,7 @@ SolverConfig loadSolverConfig(const std::filesystem::path& path)
         "use_rzone_symmetry",
         "rzone_max_cells",
         "rzone_shadow_exact_check",
+        "rzone_active_pruning",
         "load_rz",
         "save_rz",
         "rz_path",
@@ -214,6 +218,11 @@ SolverConfig loadSolverConfig(const std::filesystem::path& path)
         "network",
         "model_path",
         "sgf_path",
+    };
+    static const std::unordered_set<std::string> optional = {
+        // Added after the original strict cfg format. Keep older experiment
+        // files usable; absence means the feature is disabled.
+        "rzone_active_pruning",
     };
 
     std::string line_text;
@@ -232,7 +241,7 @@ SolverConfig loadSolverConfig(const std::filesystem::path& path)
         const std::string key = trim(line_text.substr(0, separator));
         const std::string value = trim(line_text.substr(separator + 1));
         if (key.empty()) throw configError(path, line_number, "configuration key cannot be empty");
-        if (required.count(key) == 0) {
+        if (known.count(key) == 0) {
             throw configError(path, line_number, "unknown configuration key: " + key);
         }
         if (!seen.insert(key).second) {
@@ -273,6 +282,8 @@ SolverConfig loadSolverConfig(const std::filesystem::path& path)
             result.rzone_max_cells = static_cast<unsigned>(parsed);
         } else if (key == "rzone_shadow_exact_check") {
             result.rzone_shadow_exact_check = parseBool(value, path, line_number, key);
+        } else if (key == "rzone_active_pruning") {
+            result.rzone_active_pruning = parseBool(value, path, line_number, key);
         } else if (key == "load_rz") {
             result.load_rz = parseBool(value, path, line_number, key);
         } else if (key == "save_rz") {
@@ -291,7 +302,8 @@ SolverConfig loadSolverConfig(const std::filesystem::path& path)
     }
     if (!input.eof()) throw configError(path, line_number, "failed while reading configuration file");
 
-    for (const std::string& key : required) {
+    for (const std::string& key : known) {
+        if (optional.count(key) != 0) continue;
         if (seen.count(key) == 0) throw configError(path, 0, "missing required key: " + key);
     }
     try {

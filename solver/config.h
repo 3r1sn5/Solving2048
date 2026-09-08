@@ -23,6 +23,7 @@ struct SolverConfig {
     bool use_rzone_symmetry = false;
     unsigned rzone_max_cells = 16;
     bool rzone_shadow_exact_check = false;
+    bool rzone_active_pruning = false;
     bool load_rz = false;
     bool save_rz = false;
     std::filesystem::path rz_path;
