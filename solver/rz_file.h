@@ -22,9 +22,15 @@ public:
     static constexpr std::uint32_t kSemanticsVersion = 1;
 
     static RzFileSummary load(const std::filesystem::path& path, RZoneTable& table);
+    static RzFileSummary summarize(
+        const RZoneTable& table,
+        const RzFileSummary* verified_prefix = nullptr);
     static RzFileSummary save(const std::filesystem::path& path, const RZoneTable& table);
 
     static RzFileSummary load(const std::filesystem::path& path, Solver& solver);
+    static RzFileSummary summarize(
+        const Solver& solver,
+        const RzFileSummary* verified_prefix = nullptr);
     static RzFileSummary save(const std::filesystem::path& path, const Solver& solver);
 };
 

@@ -557,24 +557,19 @@ std::vector<RZoneCertificate> validateRecords(
     return certificates;
 }
 
-std::vector<DiskRecord> recordsFromTable(const RZoneTable& table)
+DiskRecord recordFromTable(const RZoneTable& table, std::size_t index)
 {
-    std::vector<DiskRecord> records;
-    records.reserve(table.size());
-    for (std::size_t index = 0; index < table.size(); ++index) {
-        const RZoneCertificate* found = table.find(
-            static_cast<RZoneCertificateId>(index + 1));
-        if (!found) throw std::logic_error("RZone table certificate IDs are not contiguous");
-        const RZoneCertificate& certificate = *found;
-        if (!certificate.validated ||
-            certificate.id != static_cast<RZoneCertificateId>(index + 1) ||
-            certificate.winning_tile != table.winningTile()) {
-            throw std::logic_error(
-                "RZone table contains an unpublished or incompatible certificate");
-        }
-        records.push_back(encodeCertificate(certificate));
+    const RZoneCertificate* found = table.find(
+        static_cast<RZoneCertificateId>(index + 1));
+    if (!found) throw std::logic_error("RZone table certificate IDs are not contiguous");
+    const RZoneCertificate& certificate = *found;
+    if (!certificate.validated ||
+        certificate.id != static_cast<RZoneCertificateId>(index + 1) ||
+        certificate.winning_tile != table.winningTile()) {
+        throw std::logic_error(
+            "RZone table contains an unpublished or incompatible certificate");
     }
-    return records;
+    return encodeCertificate(certificate);
 }
 
 } // namespace
@@ -690,8 +685,7 @@ RzFileSummary RzFile::load(const std::filesystem::path& path, RZoneTable& table)
 RzFileSummary RzFile::save(const std::filesystem::path& path, const RZoneTable& table)
 {
     if (path.empty()) throw std::invalid_argument("persistent RZone output path cannot be empty");
-    const std::vector<DiskRecord> records = recordsFromTable(table);
-    const std::uint64_t record_count = records.size();
+    const std::uint64_t record_count = table.size();
 
     if (!path.parent_path().empty()) {
         std::error_code directory_error;
@@ -710,7 +704,8 @@ RzFileSummary RzFile::save(const std::filesystem::path& path, const RZoneTable& 
         const auto provisional = makeHeader(table.winning_tile_, record_count, 0);
         writeExact(output, provisional.data(), provisional.size(), temporary_path);
 
-        for (const DiskRecord& record : records) {
+        for (std::size_t index = 0; index < table.size(); ++index) {
+            const DiskRecord record = recordFromTable(table, index);
             const auto bytes = encodeRecord(record);
             updateCrc64(checksum, bytes.data(), bytes.size());
             writeExact(output, bytes.data(), bytes.size(), temporary_path);
@@ -740,6 +735,37 @@ RzFileSummary RzFile::save(const std::filesystem::path& path, const RZoneTable& 
     return {record_count, checksum, kHeaderSize + payload_size};
 }
 
+RzFileSummary RzFile::summarize(
+    const RZoneTable& table,
+    const RzFileSummary* verified_prefix)
+{
+    std::uint64_t first_record = 0;
+    std::uint64_t checksum = 0;
+    if (verified_prefix) {
+        if (verified_prefix->record_count > table.size() ||
+            verified_prefix->file_size !=
+                kHeaderSize + verified_prefix->record_count * kRecordSize) {
+            throw std::invalid_argument(
+                "RZone summary prefix is incompatible with the current table");
+        }
+        first_record = verified_prefix->record_count;
+        checksum = verified_prefix->payload_checksum;
+    }
+    for (std::size_t index = static_cast<std::size_t>(first_record);
+         index < table.size();
+         ++index) {
+        const DiskRecord record = recordFromTable(table, index);
+        const auto bytes = encodeRecord(record);
+        updateCrc64(checksum, bytes.data(), bytes.size());
+    }
+    const std::uint64_t record_count = table.size();
+    return {
+        record_count,
+        checksum,
+        kHeaderSize + record_count * kRecordSize,
+    };
+}
+
 RzFileSummary RzFile::load(const std::filesystem::path& path, Solver& solver)
 {
     if (solver.solve_started_) {
@@ -760,6 +786,21 @@ RzFileSummary RzFile::save(const std::filesystem::path& path, const Solver& solv
         throw std::logic_error("persistent RZone saving requires RZone generation or lookup");
     }
     return save(path, solver.rzone_table_);
+}
+
+RzFileSummary RzFile::summarize(
+    const Solver& solver,
+    const RzFileSummary* verified_prefix)
+{
+    if (!solver.solve_finished_) {
+        throw std::logic_error(
+            "persistent RZone can only be summarized after solve()");
+    }
+    if (solver.options_.rzone_mode == RZoneMode::Disabled) {
+        throw std::logic_error(
+            "persistent RZone summarization requires RZone generation or lookup");
+    }
+    return summarize(solver.rzone_table_, verified_prefix);
 }
 
 } // namespace solver2048

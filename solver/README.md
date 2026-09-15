@@ -234,6 +234,59 @@ hits separately. `--tt-symmetry` without `--tt` is rejected.
 
 Run `solver/solver2048 --help` for all options.
 
+## Multi-opening batch mode
+
+Place ordered openings in a text file, one `tile@position,tile@position`
+specification per line:
+
+```text
+2@0,2@1
+2@0,2@5
+2@0,4@1
+```
+
+Then solve the complete sequence with one command:
+
+```bash
+solver/solver2048 \
+  --config solver/solver.cfg \
+  --openings-file openings.txt \
+  --output-dir result/target32-multi \
+  --verify
+```
+
+For a short sequence, repeat `--opening` instead of using a file:
+
+```bash
+solver/solver2048 --config solver/solver.cfg \
+  --opening 2@0,2@1 --opening 2@0,2@5 \
+  --output-dir result/target32-multi
+```
+
+Batch mode requires the exact TT in its first version. It starts with empty
+proof tables, keeps the accumulated TT/RZone in memory between openings, and
+writes only the final `proof.tt` and optional `proof.rz`. Each opening gets an
+ordered `sgf/000001.sgf` file. `proof_sequence.txt` binds those SGFs to the
+final artifacts, while `batch_status.txt` records per-opening outcome, nodes,
+time, and cumulative record counts. Existing managed output files are never
+overwritten; resume/checkpoint support is intentionally deferred.
+The single-run-only `opening` and `sgf_path` keys may be omitted from a config
+used with `--openings-file` or `--opening`; TT/RZone paths and load/save flags
+are also replaced by the batch-managed files below `--output-dir`.
+
+Only a `WIN` opening is committed to the sequence. A non-Win result writes its
+diagnostic SGF, stops the batch, and publishes neither final artifacts nor a
+sequence manifest. `--verify` releases the Solver tables after saving and runs
+the same ordered source-table verification as the standalone checker.
+
+The generated sequence can also be checked later with:
+
+```bash
+solver/proof_checker --sequence result/target32-multi/proof_sequence.txt
+```
+
+The original no-argument/config-driven single-opening mode is unchanged.
+
 ## Proof checker
 
 Build the first logical proof checker with:
@@ -287,10 +340,10 @@ verify without `--rz`. In multi-opening mode, each SGF is replayed exactly once.
 Trace-local TT references may use only completed sources in the current SGF;
 persistent TT/RZone references may use only sources established by earlier
 SGFs. Declared loaded-entry counts must equal the accumulated earlier sources,
-and declared output counts must equal earlier plus newly verified sources. The
-last SGF is bound exactly to the supplied final TT checksum. Earlier TT
-snapshots need not remain on disk: their manifests are checked as cumulative
-lineage counts because TT serialization is not prefix-stable. Every RZone
+while the checker derives newly verified states directly from each trace. The
+last SGF is bound exactly to the supplied final TT checksum and counts. Earlier
+TT snapshots need not remain on disk or carry a checksum because TT
+serialization is not prefix-stable. Every RZone
 manifest is checked directly against the supplied final append-only prefix.
 The final TT and RZone must be fully covered by the ordered SGF sequence.
 

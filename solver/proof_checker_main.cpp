@@ -1,4 +1,5 @@
 #include "proof_checker.h"
+#include "proof_sequence.h"
 
 #include <chrono>
 #include <filesystem>
@@ -13,6 +14,7 @@ namespace {
 
 struct CommandLine {
     std::vector<std::filesystem::path> sgf_paths;
+    std::filesystem::path sequence_path;
     std::filesystem::path tt_path;
     std::filesystem::path rz_path;
     bool help = false;
@@ -27,12 +29,18 @@ CommandLine parseCommandLine(int argc, char** argv)
             command.help = true;
             return command;
         }
-        if (option != "--sgf" && option != "--tt" && option != "--rz") {
+        if (option != "--sgf" && option != "--sequence" &&
+            option != "--tt" && option != "--rz") {
             throw std::invalid_argument("unknown option: " + option);
         }
         if (++index >= argc) throw std::invalid_argument("missing value after " + option);
         if (option == "--sgf") {
             command.sgf_paths.emplace_back(argv[index]);
+        } else if (option == "--sequence") {
+            if (!command.sequence_path.empty()) {
+                throw std::invalid_argument("--sequence may only be specified once");
+            }
+            command.sequence_path = argv[index];
         } else if (option == "--tt") {
             if (!command.tt_path.empty()) throw std::invalid_argument("--tt may only be specified once");
             command.tt_path = argv[index];
@@ -41,7 +49,21 @@ CommandLine parseCommandLine(int argc, char** argv)
             command.rz_path = argv[index];
         }
     }
-    if (command.sgf_paths.empty()) throw std::invalid_argument("--sgf is required");
+    if (!command.sequence_path.empty()) {
+        if (!command.sgf_paths.empty() || !command.tt_path.empty() ||
+            !command.rz_path.empty()) {
+            throw std::invalid_argument(
+                "--sequence cannot be combined with --sgf, --tt, or --rz");
+        }
+        const solver2048::ProofSequenceManifest manifest =
+            solver2048::readProofSequenceManifest(command.sequence_path);
+        command.sgf_paths = manifest.sgf_paths;
+        command.tt_path = manifest.tt_path;
+        command.rz_path = manifest.rz_path;
+    }
+    if (command.sgf_paths.empty()) {
+        throw std::invalid_argument("--sgf or --sequence is required");
+    }
     if (command.tt_path.empty()) throw std::invalid_argument("--tt is required");
     return command;
 }
@@ -50,7 +72,8 @@ void printHelp(const char* program)
 {
     std::cout
         << "Usage: " << program
-        << " --sgf PATH [--sgf PATH ...] --tt FINAL_PATH [--rz FINAL_PATH]\n\n"
+        << " --sgf PATH [--sgf PATH ...] --tt FINAL_PATH [--rz FINAL_PATH]\n"
+        << "       " << program << " --sequence PATH\n\n"
         << "Verify the exact root Win/Loss proof declared by a solver SGF against a\n"
         << "persistent TT snapshot and, when bound by the SGF, an RZone snapshot.\n"
         << "The checker audits every retained SGF DFS node, independently replays\n"

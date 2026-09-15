@@ -1681,9 +1681,6 @@ SgfProofVerificationResult verifySgfAgainstPriorSources(
         }
         artifact_binding_verified = verifyTtArtifactBinding(manifest, table);
     } else {
-        if (require_tt_binding && !manifest.hasArtifactBinding()) {
-            fileFail(sgf_path, "multi-opening verification requires a bound TT output manifest");
-        }
         if (manifest.hasArtifactBinding()) {
             if (*manifest.tt_format_version != TtFile::kFormatVersion ||
                 *manifest.tt_player_records > table.summary().player_entries ||

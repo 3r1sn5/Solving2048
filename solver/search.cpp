@@ -74,6 +74,54 @@ Solver::Solver(const Game& game, SolverOptions options, ProgressCallback progres
     }
 }
 
+void Solver::adoptPersistentProofs(Solver& completed)
+{
+    if (solve_started_ || !player_tt_.empty() || !environment_tt_.empty() ||
+        !rzone_table_.certificates_.empty()) {
+        throw std::logic_error("proofs can only be adopted by a fresh Solver");
+    }
+    if (!completed.solve_finished_) {
+        throw std::logic_error("proofs can only be adopted from a completed Solver");
+    }
+    if (options_.winning_tile != completed.options_.winning_tile ||
+        options_.use_transposition_table !=
+            completed.options_.use_transposition_table ||
+        options_.use_tt_symmetry != completed.options_.use_tt_symmetry ||
+        options_.rzone_mode != completed.options_.rzone_mode ||
+        options_.rzone_lookup_policy != completed.options_.rzone_lookup_policy ||
+        options_.use_rzone_symmetry != completed.options_.use_rzone_symmetry ||
+        options_.rzone_max_cells != completed.options_.rzone_max_cells) {
+        throw std::invalid_argument(
+            "cannot adopt proof tables across incompatible solver settings");
+    }
+
+    player_tt_ = std::move(completed.player_tt_);
+    environment_tt_ = std::move(completed.environment_tt_);
+    auto makePersistent = [](auto& table) {
+        for (auto& [board, entry] : table) {
+            (void)board;
+            entry.source_trace_id = 0;
+            entry.selected_action_value.reset();
+            entry.source_transform = 0;
+            entry.persistent = true;
+        }
+    };
+    makePersistent(player_tt_);
+    makePersistent(environment_tt_);
+
+    rzone_table_.certificates_ =
+        std::move(completed.rzone_table_.certificates_);
+    rzone_table_.patterns_ = std::move(completed.rzone_table_.patterns_);
+    rzone_table_.masks_by_cell_count_ =
+        std::move(completed.rzone_table_.masks_by_cell_count_);
+    rzone_table_.statistics_ = {};
+    rzone_table_.statistics_.loaded_certificates =
+        rzone_table_.certificates_.size();
+    for (const auto& masks : rzone_table_.masks_by_cell_count_) {
+        rzone_table_.statistics_.masks_indexed += masks.size();
+    }
+}
+
 SearchResult Solver::solve()
 {
     if (solve_started_) throw std::logic_error("a Solver instance can only solve once");

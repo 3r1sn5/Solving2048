@@ -1,6 +1,7 @@
 #include "config.h"
 #include "game_api.h"
 #include "proof_checker.h"
+#include "proof_sequence.h"
 #include "rz_file.h"
 #include "search.h"
 #include "sgf.h"
@@ -885,6 +886,36 @@ void testSolverConfigParsingAndValidation()
     check(parsed.opening[0] == 2 && parsed.opening[5] == 4 &&
               solver2048::formatOpening(parsed.opening) == "2@0,4@5",
           "cfg opening parsing or deterministic formatting mismatch");
+    std::string batch_config_text = validConfigText();
+    const std::string opening_line = "opening=4@5, 2@0 # inline comment\n";
+    const std::string sgf_line = "sgf_path=solver/custom.sgf\n";
+    batch_config_text.erase(
+        batch_config_text.find(opening_line), opening_line.size());
+    batch_config_text.erase(batch_config_text.find(sgf_line), sgf_line.size());
+    TemporaryConfigFile batch_config(batch_config_text);
+    const SolverConfig parsed_batch =
+        solver2048::loadSolverConfig(batch_config.path, false);
+    check(parsed_batch.opening == std::array<unsigned, 16>{} &&
+              parsed_batch.sgf_path.empty(),
+          "batch config must allow omitted single-opening fields");
+    checkThrows(
+        [&] { (void)solver2048::loadSolverConfig(batch_config.path); },
+        "single-opening config must still require opening and sgf_path");
+    const auto inline_opening = solver2048::parseOpeningSpec("4@15, 2@3");
+    check(inline_opening[3] == 2 && inline_opening[15] == 4 &&
+              solver2048::formatOpening(inline_opening) == "2@3,4@15",
+          "batch CLI opening parsing mismatch");
+    TemporaryConfigFile openings(
+        "# ordered batch\n2@0,2@1\n\n4@5, 2@0 # comment\n");
+    const auto parsed_openings = solver2048::loadOpeningsFile(openings.path);
+    check(parsed_openings.size() == 2 &&
+              solver2048::formatOpening(parsed_openings[0]) == "2@0,2@1" &&
+              solver2048::formatOpening(parsed_openings[1]) == "2@0,4@5",
+          "ordered openings-file parsing mismatch");
+    TemporaryConfigFile duplicate_openings("2@0,2@1\n2@1,2@0\n");
+    checkThrows(
+        [&] { (void)solver2048::loadOpeningsFile(duplicate_openings.path); },
+        "duplicate batch openings must be rejected");
 
     std::string legacy_text = validConfigText();
     const std::string active_setting = "rzone_active_pruning=true\n";
@@ -1365,6 +1396,25 @@ struct TemporaryRzFile {
     std::filesystem::path path;
 };
 
+void testProofSequenceManifestRoundTrip()
+{
+    TemporaryTtFile manifest_file;
+    const std::filesystem::path base = manifest_file.path.parent_path();
+    solver2048::ProofSequenceManifest expected;
+    expected.tt_path = base / "batch-proof.tt";
+    expected.rz_path = base / "batch-proof.rz";
+    expected.sgf_paths = {
+        base / "batch-sgf-000001.sgf",
+        base / "batch-sgf-000002.sgf",
+    };
+    solver2048::writeProofSequenceManifest(manifest_file.path, expected);
+    const solver2048::ProofSequenceManifest parsed =
+        solver2048::readProofSequenceManifest(manifest_file.path);
+    check(parsed.tt_path == expected.tt_path && parsed.rz_path == expected.rz_path &&
+              parsed.sgf_paths == expected.sgf_paths,
+          "proof sequence manifest paths or order changed during round trip");
+}
+
 std::uint8_t readByte(const std::filesystem::path& path, std::uint64_t offset)
 {
     std::ifstream input(path, std::ios::in | std::ios::binary);
@@ -1432,6 +1482,7 @@ void testPersistentRzRoundTripAndMaxCellIndexing()
     RZoneTable source(game, 16, 16);
     const auto terminal = source.createTerminal(tiles({{0, 16}}), Phase::Environment);
     check(terminal.has_value(), "persistent RZone terminal fixture is missing");
+    const RzFileSummary terminal_prefix = RzFile::summarize(source);
     const auto fixed = source.liftFixedSlide(
         tiles({{0, 8}, {1, 8}}), Direction::Left, *terminal);
     check(fixed.has_value(), "persistent RZone FixedSlide fixture is missing");
@@ -1442,11 +1493,19 @@ void testPersistentRzRoundTripAndMaxCellIndexing()
 
     TemporaryRzFile snapshot;
     const RzFileSummary saved = RzFile::save(snapshot.path, source);
+    const RzFileSummary summarized = RzFile::summarize(source);
+    const RzFileSummary incrementally_summarized =
+        RzFile::summarize(source, &terminal_prefix);
     check(saved.record_count == 3 &&
+              summarized.record_count == saved.record_count &&
+              summarized.payload_checksum == saved.payload_checksum &&
+              summarized.file_size == saved.file_size &&
+              incrementally_summarized.record_count == saved.record_count &&
+              incrementally_summarized.payload_checksum == saved.payload_checksum &&
               saved.file_size == RzFile::kHeaderSize + 3 * RzFile::kRecordSize &&
               std::filesystem::file_size(snapshot.path) == saved.file_size &&
               !std::filesystem::exists(snapshot.path.string() + ".tmp"),
-          "RZone writer produced an invalid snapshot or left its temporary file");
+          "RZone writer/summary produced invalid data or left its temporary file");
     const RzProofTable proof_table = RzProofTable::load(snapshot.path);
     check(proof_table.summary().record_count == saved.record_count &&
               proof_table.prefixChecksum(saved.record_count) == saved.payload_checksum &&
@@ -1605,6 +1664,16 @@ void testPersistentTtRoundTripAndCrossOpeningReuse()
     second_game.slides[1] = first_game.slides[1];
     second_game.values[10] = 100.0;
     second_game.values[11] = 50.0;
+
+    FakeGame adopted_game = second_game;
+    Solver adopted_solver(adopted_game, options);
+    adopted_solver.adoptPersistentProofs(first_solver);
+    const SearchResult adopted = adopted_solver.solve();
+    check(adopted.outcome == Outcome::Win &&
+              adopted.statistics.player_tt_loaded_entries == 1 &&
+              adopted.statistics.environment_tt_loaded_entries == 1 &&
+              adopted.statistics.player_persistent_tt_hits == 1,
+          "in-memory proof handoff must match persistent TT loading semantics");
 
     Solver second_solver(second_game, options);
     const TtFileSummary loaded = TtFile::load(temporary.path, second_solver);
@@ -2113,9 +2182,22 @@ void testRealGameApiAndThreeNodeSearch()
         proof_summary.environment_entries;
     SgfWriter::write(persistent_sgf.path, persistent_root, persistent_metadata);
 
+    TemporaryTtFile unbound_source_sgf;
+    SgfMetadata unbound_source_metadata = proof_metadata;
+    unbound_source_metadata.save_tt = false;
+    unbound_source_metadata.tt_format_version.reset();
+    unbound_source_metadata.tt_payload_checksum.reset();
+    unbound_source_metadata.tt_file_size.reset();
+    unbound_source_metadata.tt_player_records.reset();
+    unbound_source_metadata.tt_environment_records.reset();
+    SgfWriter::write(
+        unbound_source_sgf.path,
+        *symmetry_result.root,
+        unbound_source_metadata);
+
     const solver2048::ProofSequenceVerificationResult sequence_verified =
         solver2048::verifySgfProofSequence(
-            {proof_sgf.path, persistent_sgf.path}, proof_table);
+            {unbound_source_sgf.path, persistent_sgf.path}, proof_table);
     check(sequence_verified.openings.size() == 2 &&
               sequence_verified.openings[1].root_outcome == Outcome::Win &&
               sequence_verified.openings[1].statistics.tt_source_references_checked == 1 &&
@@ -2125,13 +2207,13 @@ void testRealGameApiAndThreeNodeSearch()
     checkThrows(
         [&] {
             (void)solver2048::verifySgfProofSequence(
-                {persistent_sgf.path, proof_sgf.path}, proof_table);
+                {persistent_sgf.path, unbound_source_sgf.path}, proof_table);
         },
         "multi-opening checker must reject SGFs supplied out of chronological order");
     checkThrows(
         [&] {
             (void)solver2048::verifySgfProofSequence(
-                {proof_sgf.path, proof_sgf.path}, proof_table);
+                {unbound_source_sgf.path, unbound_source_sgf.path}, proof_table);
         },
         "multi-opening checker must reject a duplicate SGF path");
 
@@ -2699,6 +2781,7 @@ int main()
          testPersistentRzRoundTripAndMaxCellIndexing},
         {"persistent RZone compatibility and corruption rejection",
          testPersistentRzRejectsIncompatibleAndCorruptFiles},
+        {"proof sequence manifest round trip", testProofSequenceManifestRoundTrip},
         {"persistent TT round trip and cross-opening reuse",
          testPersistentTtRoundTripAndCrossOpeningReuse},
         {"persistent TT compatibility and corruption rejection",

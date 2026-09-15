@@ -167,6 +167,10 @@ public:
     using ProgressCallback = std::function<void(const SearchStatistics&)>;
 
     Solver(const Game& game, SolverOptions options, ProgressCallback progress = {});
+    // Moves a completed opening's proof tables into this fresh Solver. Entries
+    // become persistent sources because their trace-local IDs belong to the
+    // earlier SGF.
+    void adoptPersistentProofs(Solver& completed);
     SearchResult solve();
 
 private:

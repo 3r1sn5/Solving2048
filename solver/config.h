@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <string>
+#include <vector>
 
 namespace solver2048 {
 
@@ -39,8 +40,15 @@ inline constexpr const char* kDefaultConfigPath = "solver/solver.cfg";
 
 } // namespace config
 
-SolverConfig loadSolverConfig(const std::filesystem::path& path);
-void validateSolverConfig(const SolverConfig& config);
+SolverConfig loadSolverConfig(
+    const std::filesystem::path& path,
+    bool require_single_run_fields = true);
+void validateSolverConfig(
+    const SolverConfig& config,
+    bool require_single_run_fields = true);
+std::array<unsigned, 16> parseOpeningSpec(const std::string& value);
+std::vector<std::array<unsigned, 16>> loadOpeningsFile(
+    const std::filesystem::path& path);
 std::string formatOpening(const std::array<unsigned, 16>& opening);
 
 } // namespace solver2048

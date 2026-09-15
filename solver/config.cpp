@@ -138,7 +138,7 @@ std::array<unsigned, 16> parseOpening(const std::string& value,
 
 } // namespace
 
-void validateSolverConfig(const SolverConfig& value)
+void validateSolverConfig(const SolverConfig& value, bool require_single_run_fields)
 {
     if (value.winning_tile < 2 ||
         (value.winning_tile & (value.winning_tile - 1)) != 0 ||
@@ -173,23 +173,28 @@ void validateSolverConfig(const SolverConfig& value)
     if ((value.load_rz || value.save_rz) && value.rz_path.empty()) {
         throw std::invalid_argument("rz_path cannot be empty when persistent RZone is enabled");
     }
-    std::size_t opening_tiles = 0;
-    for (const unsigned tile : value.opening) {
-        if (tile == 0) continue;
-        if (tile != 2 && tile != 4) {
-            throw std::invalid_argument("first-version opening tiles must be 2 or 4");
+    if (require_single_run_fields) {
+        std::size_t opening_tiles = 0;
+        for (const unsigned tile : value.opening) {
+            if (tile == 0) continue;
+            if (tile != 2 && tile != 4) {
+                throw std::invalid_argument("first-version opening tiles must be 2 or 4");
+            }
+            ++opening_tiles;
         }
-        ++opening_tiles;
-    }
-    if (opening_tiles != 2) {
-        throw std::invalid_argument("first-version fixed opening requires exactly two tiles");
+        if (opening_tiles != 2) {
+            throw std::invalid_argument(
+                "first-version fixed opening requires exactly two tiles");
+        }
+        if (value.sgf_path.empty()) throw std::invalid_argument("sgf_path cannot be empty");
     }
     if (value.network.empty()) throw std::invalid_argument("network cannot be empty");
     if (value.model_path.empty()) throw std::invalid_argument("model_path cannot be empty");
-    if (value.sgf_path.empty()) throw std::invalid_argument("sgf_path cannot be empty");
 }
 
-SolverConfig loadSolverConfig(const std::filesystem::path& path)
+SolverConfig loadSolverConfig(
+    const std::filesystem::path& path,
+    bool require_single_run_fields)
 {
     std::ifstream input(path);
     if (!input) throw configError(path, 0, "cannot open configuration file");
@@ -304,10 +309,14 @@ SolverConfig loadSolverConfig(const std::filesystem::path& path)
 
     for (const std::string& key : known) {
         if (optional.count(key) != 0) continue;
+        if (!require_single_run_fields &&
+            (key == "opening" || key == "sgf_path")) {
+            continue;
+        }
         if (seen.count(key) == 0) throw configError(path, 0, "missing required key: " + key);
     }
     try {
-        validateSolverConfig(result);
+        validateSolverConfig(result, require_single_run_fields);
     } catch (const std::exception& error) {
         throw configError(path, 0, error.what());
     }
@@ -325,6 +334,41 @@ std::string formatOpening(const std::array<unsigned, 16>& opening)
         first = false;
     }
     return formatted.str();
+}
+
+std::array<unsigned, 16> parseOpeningSpec(const std::string& value)
+{
+    return parseOpening(value, "<command line>", 0);
+}
+
+std::vector<std::array<unsigned, 16>> loadOpeningsFile(
+    const std::filesystem::path& path)
+{
+    std::ifstream input(path);
+    if (!input) throw configError(path, 0, "cannot open openings file");
+
+    std::vector<std::array<unsigned, 16>> openings;
+    std::unordered_set<std::uint64_t> seen;
+    std::string line_text;
+    std::size_t line_number = 0;
+    while (std::getline(input, line_text)) {
+        ++line_number;
+        const std::size_t comment = line_text.find('#');
+        if (comment != std::string::npos) line_text.erase(comment);
+        line_text = trim(line_text);
+        if (line_text.empty()) continue;
+        const auto opening = parseOpening(line_text, path, line_number);
+        const std::uint64_t key = boardFromTiles(opening).raw;
+        if (!seen.insert(key).second) {
+            throw configError(path, line_number, "duplicate opening");
+        }
+        openings.push_back(opening);
+    }
+    if (!input.eof()) {
+        throw configError(path, line_number, "failed while reading openings file");
+    }
+    if (openings.empty()) throw configError(path, 0, "openings file is empty");
+    return openings;
 }
 
 } // namespace solver2048

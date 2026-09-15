@@ -1,6 +1,9 @@
 #include "config.h"
 #include "game_api.h"
+#include "proof_checker.h"
+#include "proof_sequence.h"
 #include "rz_file.h"
+#include "rz_proof_file.h"
 #include "search.h"
 #include "sgf.h"
 #include "tt_file.h"
@@ -8,12 +11,17 @@
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
+#include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <limits>
+#include <memory>
 #include <optional>
+#include <sstream>
 #include <stdexcept>
 #include <string>
+#include <unordered_set>
+#include <vector>
 
 namespace solver2048 {
 namespace {
@@ -21,7 +29,16 @@ namespace {
 struct CommandLine {
     SolverConfig settings;
     std::filesystem::path config_path = config::kDefaultConfigPath;
+    std::vector<std::array<unsigned, 16>> batch_openings;
+    std::filesystem::path openings_file;
+    std::filesystem::path output_directory;
+    bool verify_batch = false;
+    bool sgf_path_overridden = false;
+    bool tt_path_overridden = false;
+    bool rz_path_overridden = false;
     bool help = false;
+
+    bool batchMode() const { return !batch_openings.empty() || !openings_file.empty(); }
 };
 
 std::uint64_t parseUnsigned(const std::string& text, const char* option)
@@ -76,11 +93,14 @@ CommandLine parseCommandLine(int argc, char** argv)
     }
 
     bool config_path_seen = false;
+    bool batch_requested = false;
     for (int index = 1; index < argc; ++index) {
         const std::string option = argv[index];
         const bool takes_value = option == "--config" || option == "--winning-tile" ||
                                  option == "--node-limit" || option == "--progress-interval" ||
                                  option == "--network" || option == "--model" || option == "--sgf" ||
+                                 option == "--opening" || option == "--openings-file" ||
+                                 option == "--output-dir" ||
                                  option == "--tt-file" || option == "--rzone-mode" ||
                                  option == "--rz-file" ||
                                  option == "--rzone-lookup-policy" ||
@@ -96,7 +116,8 @@ CommandLine parseCommandLine(int argc, char** argv)
                              option == "--rzone-shadow-exact-check" ||
                              option == "--no-rzone-shadow-exact-check" ||
                              option == "--rzone-active-pruning" ||
-                             option == "--no-rzone-active-pruning";
+                             option == "--no-rzone-active-pruning" ||
+                             option == "--verify";
         if (!takes_value && !is_flag) throw std::invalid_argument("unknown option: " + option);
         if (!takes_value) continue;
         if (++index >= argc) throw std::invalid_argument("missing value after " + option);
@@ -105,9 +126,12 @@ CommandLine parseCommandLine(int argc, char** argv)
             command.config_path = argv[index];
             config_path_seen = true;
         }
+        if (option == "--opening" || option == "--openings-file") {
+            batch_requested = true;
+        }
     }
 
-    command.settings = loadSolverConfig(command.config_path);
+    command.settings = loadSolverConfig(command.config_path, !batch_requested);
     for (int index = 1; index < argc; ++index) {
         const std::string option = argv[index];
         auto nextValue = [&]() -> std::string {
@@ -145,6 +169,7 @@ CommandLine parseCommandLine(int argc, char** argv)
             command.settings.save_tt = false;
         } else if (option == "--tt-file") {
             command.settings.tt_path = nextValue();
+            command.tt_path_overridden = true;
         } else if (option == "--rzone-mode") {
             command.settings.rzone_mode = parseRZoneModeOption(nextValue());
             if (command.settings.rzone_mode == RZoneMode::Disabled) {
@@ -180,15 +205,66 @@ CommandLine parseCommandLine(int argc, char** argv)
             command.settings.save_rz = false;
         } else if (option == "--rz-file") {
             command.settings.rz_path = nextValue();
+            command.rz_path_overridden = true;
         } else if (option == "--network") {
             command.settings.network = nextValue();
         } else if (option == "--model") {
             command.settings.model_path = nextValue();
         } else if (option == "--sgf") {
             command.settings.sgf_path = nextValue();
+            command.sgf_path_overridden = true;
+        } else if (option == "--opening") {
+            command.batch_openings.push_back(parseOpeningSpec(nextValue()));
+        } else if (option == "--openings-file") {
+            if (!command.openings_file.empty()) {
+                throw std::invalid_argument(
+                    "--openings-file may only be specified once");
+            }
+            command.openings_file = nextValue();
+        } else if (option == "--output-dir") {
+            if (!command.output_directory.empty()) {
+                throw std::invalid_argument("--output-dir may only be specified once");
+            }
+            command.output_directory = nextValue();
+        } else if (option == "--verify") {
+            command.verify_batch = true;
         }
     }
-    validateSolverConfig(command.settings);
+    if (!command.openings_file.empty() && !command.batch_openings.empty()) {
+        throw std::invalid_argument(
+            "--openings-file cannot be combined with --opening");
+    }
+    if (!command.openings_file.empty()) {
+        command.batch_openings = loadOpeningsFile(command.openings_file);
+    }
+    if (command.batchMode()) {
+        if (command.output_directory.empty()) {
+            throw std::invalid_argument("batch mode requires --output-dir");
+        }
+        if (command.sgf_path_overridden || command.tt_path_overridden ||
+            command.rz_path_overridden) {
+            throw std::invalid_argument(
+                "batch mode derives SGF/TT/RZone paths from --output-dir");
+        }
+        std::unordered_set<std::uint64_t> seen;
+        for (const auto& opening : command.batch_openings) {
+            if (!seen.insert(boardFromTiles(opening).raw).second) {
+                throw std::invalid_argument("batch opening list contains a duplicate");
+            }
+        }
+        if (!command.settings.use_transposition_table) {
+            throw std::invalid_argument(
+                "first-version batch mode requires the transposition table");
+        }
+    } else {
+        if (!command.output_directory.empty()) {
+            throw std::invalid_argument("--output-dir requires batch openings");
+        }
+        if (command.verify_batch) {
+            throw std::invalid_argument("--verify is currently a batch-mode option");
+        }
+    }
+    validateSolverConfig(command.settings, !command.batchMode());
     return command;
 }
 
@@ -220,6 +296,10 @@ void printHelp(const char* program)
         << "  --network NAME         Override N-tuple network\n"
         << "  --model PATH           Override N-tuple weight file\n"
         << "  --sgf PATH             Override final SGF output path\n"
+        << "  --opening SPEC         Add a batch opening; may be repeated\n"
+        << "  --openings-file PATH   Read ordered batch openings, one per line\n"
+        << "  --output-dir PATH      Write managed batch artifacts below PATH\n"
+        << "  --verify               Verify the completed batch proof sequence\n"
         << "  -h, --help             Show this help\n\n"
         << "With no options, all runtime settings are loaded from the default cfg.\n"
         << "A persistent TT file must match the selected winning tile and symmetry mode.\n";
@@ -235,6 +315,284 @@ void printBoard(const std::array<unsigned, 16>& tiles)
     }
 }
 
+SolverOptions solverOptions(const SolverConfig& settings)
+{
+    SolverOptions options;
+    options.winning_tile = settings.winning_tile;
+    options.node_limit = settings.node_limit;
+    options.progress_interval = settings.progress_interval;
+    options.use_transposition_table = settings.use_transposition_table;
+    options.use_tt_symmetry = settings.use_tt_symmetry;
+    options.rzone_mode = settings.rzone_mode;
+    options.rzone_lookup_policy = settings.rzone_lookup_policy;
+    options.use_rzone_symmetry = settings.use_rzone_symmetry;
+    options.rzone_max_cells = settings.rzone_max_cells;
+    options.rzone_shadow_exact_check = settings.rzone_shadow_exact_check;
+    options.rzone_active_pruning = settings.rzone_active_pruning;
+    return options;
+}
+
+void requireNewBatchPath(const std::filesystem::path& path)
+{
+    std::error_code exists_error;
+    const bool exists = std::filesystem::exists(path, exists_error);
+    if (exists_error) {
+        throw std::runtime_error(
+            "cannot inspect batch output path " + path.string() + ": " +
+            exists_error.message());
+    }
+    if (exists) {
+        throw std::runtime_error(
+            "batch output already exists (resume is not implemented yet): " +
+            path.string());
+    }
+}
+
+std::filesystem::path numberedSgfPath(const std::filesystem::path& directory,
+                                      std::size_t index)
+{
+    std::ostringstream name;
+    name << std::setw(6) << std::setfill('0') << index + 1 << ".sgf";
+    return directory / name.str();
+}
+
+SgfMetadata batchSgfMetadata(
+    const CommandLine& command,
+    const std::array<unsigned, 16>& opening,
+    const SearchResult& result,
+    double elapsed,
+    bool has_prior_opening,
+    bool final_opening,
+    const std::filesystem::path& tt_path,
+    const std::filesystem::path& rz_path,
+    const std::optional<TtFileSummary>& tt_summary,
+    const std::optional<RzFileSummary>& rz_summary)
+{
+    const SolverConfig& settings = command.settings;
+    SgfMetadata metadata;
+    metadata.winning_tile = settings.winning_tile;
+    metadata.node_limit = settings.node_limit;
+    metadata.use_transposition_table = settings.use_transposition_table;
+    metadata.use_tt_symmetry = settings.use_tt_symmetry;
+    metadata.rzone_mode = settings.rzone_mode;
+    metadata.rzone_lookup_policy = settings.rzone_lookup_policy;
+    metadata.use_rzone_symmetry = settings.use_rzone_symmetry;
+    metadata.rzone_max_cells = settings.rzone_max_cells;
+    metadata.rzone_shadow_exact_check = settings.rzone_shadow_exact_check;
+    metadata.rzone_active_pruning = settings.rzone_active_pruning;
+    metadata.load_tt = has_prior_opening;
+    metadata.save_tt = final_opening;
+    metadata.tt_path = tt_path;
+    if (tt_summary) {
+        metadata.tt_format_version = TtFile::kFormatVersion;
+        metadata.tt_payload_checksum = tt_summary->payload_checksum;
+        metadata.tt_file_size = tt_summary->file_size;
+        metadata.tt_player_records = tt_summary->player_entries;
+        metadata.tt_environment_records = tt_summary->environment_entries;
+    }
+    const bool rzone_enabled = settings.rzone_mode != RZoneMode::Disabled;
+    metadata.load_rz = has_prior_opening && rzone_enabled;
+    metadata.save_rz = final_opening && rzone_enabled;
+    metadata.rz_path = rz_path;
+    if (rz_summary) {
+        metadata.rz_format_version = RzFile::kFormatVersion;
+        metadata.rz_semantics_version = RzFile::kSemanticsVersion;
+        metadata.rz_prefix_record_count = rz_summary->record_count;
+        metadata.rz_prefix_checksum = rz_summary->payload_checksum;
+    }
+    metadata.config_path = command.config_path;
+    metadata.opening = opening;
+    metadata.network = settings.network;
+    metadata.model_path = settings.model_path;
+    metadata.elapsed_seconds = elapsed;
+    metadata.statistics = result.statistics;
+    return metadata;
+}
+
+int runBatch(const CommandLine& command)
+{
+    const SolverConfig& settings = command.settings;
+    const std::filesystem::path output_directory =
+        std::filesystem::absolute(command.output_directory).lexically_normal();
+    const std::filesystem::path sgf_directory = output_directory / "sgf";
+    const std::filesystem::path tt_path = output_directory / "proof.tt";
+    const std::filesystem::path rz_path = output_directory / "proof.rz";
+    const std::filesystem::path sequence_path =
+        output_directory / "proof_sequence.txt";
+    const std::filesystem::path status_path = output_directory / "batch_status.txt";
+    const bool rzone_enabled = settings.rzone_mode != RZoneMode::Disabled;
+
+    requireNewBatchPath(tt_path);
+    if (rzone_enabled) requireNewBatchPath(rz_path);
+    requireNewBatchPath(sequence_path);
+    requireNewBatchPath(status_path);
+    for (std::size_t index = 0; index < command.batch_openings.size(); ++index) {
+        requireNewBatchPath(numberedSgfPath(sgf_directory, index));
+    }
+    std::error_code directory_error;
+    std::filesystem::create_directories(sgf_directory, directory_error);
+    if (directory_error) {
+        throw std::runtime_error(
+            "cannot create batch output directory: " + directory_error.message());
+    }
+
+    std::ofstream status(status_path, std::ios::out | std::ios::trunc);
+    if (!status) {
+        throw std::runtime_error("cannot create batch status file: " + status_path.string());
+    }
+    status << "format_version=1\n"
+           << "state=RUNNING\n"
+           << "openings_total=" << command.batch_openings.size() << '\n';
+    status.flush();
+
+    struct RetainedSolver {
+        std::unique_ptr<GameApi> game;
+        std::unique_ptr<Solver> solver;
+    };
+    std::optional<RetainedSolver> retained;
+    std::vector<std::filesystem::path> sgf_paths;
+    sgf_paths.reserve(command.batch_openings.size());
+    std::optional<RzFileSummary> accumulated_rz_summary;
+
+    for (std::size_t index = 0; index < command.batch_openings.size(); ++index) {
+        const auto& opening = command.batch_openings[index];
+        std::cout << "batch opening " << index + 1 << '/'
+                  << command.batch_openings.size() << ": "
+                  << formatOpening(opening) << '\n';
+
+        auto game = std::make_unique<GameApi>(
+            settings.network, settings.model_path, opening);
+        const auto opening_started = std::chrono::steady_clock::now();
+        auto solver = std::make_unique<Solver>(
+            *game,
+            solverOptions(settings),
+            [&, index](const SearchStatistics& statistics) {
+                const double elapsed = std::chrono::duration<double>(
+                    std::chrono::steady_clock::now() - opening_started).count();
+                std::cerr << "progress: opening=" << index + 1
+                          << " visited=" << statistics.combinedNodes()
+                          << " tt_hits=" << statistics.ttHits()
+                          << " rzone_hits=" << statistics.rzone.hits()
+                          << " elapsed=" << std::fixed << std::setprecision(3)
+                          << elapsed << "s\n";
+            });
+        if (retained) {
+            solver->adoptPersistentProofs(*retained->solver);
+            retained.reset();
+        }
+
+        SearchResult result = solver->solve();
+        const double elapsed = std::chrono::duration<double>(
+            std::chrono::steady_clock::now() - opening_started).count();
+        const bool final_opening = index + 1 == command.batch_openings.size();
+        const std::filesystem::path sgf_path = numberedSgfPath(sgf_directory, index);
+
+        std::optional<RzFileSummary> rz_summary;
+        if (rzone_enabled) {
+            rz_summary = RzFile::summarize(
+                *solver,
+                accumulated_rz_summary ? &*accumulated_rz_summary : nullptr);
+        }
+        std::optional<TtFileSummary> tt_summary;
+        if (result.outcome == Outcome::Win && final_opening) {
+            tt_summary = TtFile::save(tt_path, *solver);
+            if (rzone_enabled) {
+                const RzFileSummary saved = RzFile::save(rz_path, *solver);
+                if (saved.record_count != rz_summary->record_count ||
+                    saved.payload_checksum != rz_summary->payload_checksum) {
+                    throw std::logic_error(
+                        "incremental RZone summary differs from the final snapshot");
+                }
+                rz_summary = saved;
+            }
+        }
+        const SgfMetadata metadata = batchSgfMetadata(
+            command,
+            opening,
+            result,
+            elapsed,
+            index != 0,
+            result.outcome == Outcome::Win && final_opening,
+            tt_path,
+            rz_path,
+            tt_summary,
+            rz_summary);
+        SgfWriter::write(sgf_path, *result.root, metadata);
+
+        status << "opening=" << index + 1
+               << " spec=" << formatOpening(opening)
+               << " outcome=" << outcomeName(result.outcome)
+               << " visited=" << result.statistics.combinedNodes()
+               << " player_tt_entries=" << result.statistics.playerTtEntries()
+               << " environment_tt_entries="
+               << result.statistics.environmentTtEntries()
+               << " rzone_records="
+               << (rz_summary ? rz_summary->record_count : 0)
+               << " elapsed_seconds=" << std::fixed << std::setprecision(6)
+               << elapsed << " sgf=" << sgf_path.string() << '\n';
+        status.flush();
+
+        std::cout << "batch result " << index + 1 << ": "
+                  << outcomeName(result.outcome)
+                  << ", visited=" << result.statistics.combinedNodes()
+                  << ", new_tt=" << result.statistics.ttStores()
+                  << ", persistent_tt_hits="
+                  << result.statistics.player_persistent_tt_hits +
+                         result.statistics.environment_persistent_tt_hits
+                  << ", rzone_records="
+                  << (rz_summary ? rz_summary->record_count : 0)
+                  << ", elapsed=" << std::fixed << std::setprecision(6)
+                  << elapsed << "s\n";
+
+        if (result.outcome != Outcome::Win) {
+            status << "state=FAILED\nfailed_opening=" << index + 1 << '\n';
+            status.close();
+            throw std::runtime_error(
+                "batch stopped because opening " + std::to_string(index + 1) +
+                " did not produce WIN; its proof delta was not published");
+        }
+
+        sgf_paths.push_back(sgf_path);
+        accumulated_rz_summary = rz_summary;
+        retained = RetainedSolver{std::move(game), std::move(solver)};
+    }
+
+    ProofSequenceManifest manifest;
+    manifest.tt_path = tt_path;
+    if (rzone_enabled) manifest.rz_path = rz_path;
+    manifest.sgf_paths = sgf_paths;
+    writeProofSequenceManifest(sequence_path, manifest);
+    status << "state=COMPLETE\n"
+           << "sequence=" << sequence_path.string() << '\n';
+    status.close();
+
+    std::cout << "batch proof sequence: " << sequence_path.string() << '\n'
+              << "final TT: " << tt_path.string() << '\n';
+    if (rzone_enabled) std::cout << "final RZone: " << rz_path.string() << '\n';
+
+    if (command.verify_batch) {
+        retained.reset();
+        std::cout << "verifying batch proof sequence...\n";
+        const ProofTable table = ProofTable::load(tt_path);
+        std::optional<RzProofTable> rzone_table;
+        if (rzone_enabled) rzone_table = RzProofTable::load(rz_path);
+        const ProofSequenceVerificationResult verification =
+            verifySgfProofSequence(
+                sgf_paths,
+                table,
+                rzone_table ? &*rzone_table : nullptr);
+        std::cout << "batch proof status: VERIFIED\n"
+                  << "SGFs verified: " << verification.openings.size() << '\n'
+                  << "TT records cross-checked: "
+                  << verification.aggregate_statistics.tt_records_cross_checked
+                  << '\n'
+                  << "RZone records cross-checked: "
+                  << verification.aggregate_statistics.rzone_records_cross_checked
+                  << '\n';
+    }
+    return 0;
+}
+
 } // namespace
 } // namespace solver2048
 
@@ -247,22 +605,12 @@ int main(int argc, char** argv)
             printHelp(argv[0]);
             return 0;
         }
+        if (command.batchMode()) return runBatch(command);
 
         const SolverConfig& settings = command.settings;
 
         GameApi game(settings.network, settings.model_path, settings.opening);
-        SolverOptions options;
-        options.winning_tile = settings.winning_tile;
-        options.node_limit = settings.node_limit;
-        options.progress_interval = settings.progress_interval;
-        options.use_transposition_table = settings.use_transposition_table;
-        options.use_tt_symmetry = settings.use_tt_symmetry;
-        options.rzone_mode = settings.rzone_mode;
-        options.rzone_lookup_policy = settings.rzone_lookup_policy;
-        options.use_rzone_symmetry = settings.use_rzone_symmetry;
-        options.rzone_max_cells = settings.rzone_max_cells;
-        options.rzone_shadow_exact_check = settings.rzone_shadow_exact_check;
-        options.rzone_active_pruning = settings.rzone_active_pruning;
+        const SolverOptions options = solverOptions(settings);
 
         std::cout << "configuration: " << command.config_path.string() << '\n';
         std::cout << "fixed opening (Player to move):\n";

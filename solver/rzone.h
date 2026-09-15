@@ -14,6 +14,7 @@ namespace solver2048 {
 
 enum class Phase;
 class RzFile;
+class Solver;
 
 enum class RZoneMode {
     Disabled,
@@ -139,6 +140,7 @@ public:
 
 private:
     friend class RzFile;
+    friend class Solver;
 
     using PatternBucket =
         std::unordered_map<std::uint64_t, std::vector<RZoneCertificateId>>;

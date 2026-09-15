@@ -91,13 +91,21 @@ GameApi::GameApi(std::string network,
         throw std::runtime_error("N-tuple model not found: " + model_path_);
     }
 
-    static bool initialized = false;
-    if (initialized) {
-        throw std::logic_error("GameApi can only initialize the process-wide N-tuple network once");
+    static std::string initialized_network;
+    static std::filesystem::path initialized_model;
+    const std::filesystem::path normalized_model =
+        std::filesystem::absolute(model_path_).lexically_normal();
+    if (!initialized_network.empty()) {
+        if (initialized_network != network_ || initialized_model != normalized_model) {
+            throw std::logic_error(
+                "all GameApi instances in one process must use the same N-tuple network and model");
+        }
+        return;
     }
 
     moporgic::solver_api::initializeNetwork(network_, model_path_);
-    initialized = true;
+    initialized_network = network_;
+    initialized_model = normalized_model;
 }
 
 Board GameApi::fixedOpening() const
