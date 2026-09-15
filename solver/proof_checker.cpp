@@ -760,6 +760,14 @@ struct VerifiedExactSource {
     std::size_t children_total = 0;
 };
 
+struct VerifiedSourceTables {
+    std::unordered_map<StateKey, VerifiedExactSource, StateKeyHash> exact_by_state;
+    std::vector<bool> rzone_by_id;
+    std::uint64_t player_exact_states = 0;
+    std::uint64_t environment_exact_states = 0;
+    std::uint64_t rzone_sources = 0;
+};
+
 class TraceVerifier {
 public:
     TraceVerifier(const std::filesystem::path& path,
@@ -767,13 +775,15 @@ public:
                   const ProofManifest& manifest,
                   const ProofTable& table,
                   const RzProofTable* rzone_table,
-                  RZoneCertificateId rzone_maximum_id)
+                  RZoneCertificateId rzone_maximum_id,
+                  const VerifiedSourceTables& prior_sources)
         : path_(path),
           parser_(parser),
           manifest_(manifest),
           table_(table),
           rzone_table_(rzone_table),
           rzone_maximum_id_(rzone_maximum_id),
+          prior_sources_(prior_sources),
           rzone_sources_(static_cast<std::size_t>(rzone_maximum_id) + 1, false) {}
 
     TraceVerificationStatistics verify(const Properties& root_properties)
@@ -788,26 +798,17 @@ public:
             fail(manifest_.root_board, Phase::Player,
                  "Unknown is not an exact root proof outcome");
         }
-        const std::uint64_t expected_tt_records = manifest_.transposition_table
-            ? table_.summary().entries()
-            : 0;
-        if (verified_states_.size() != expected_tt_records) {
-            fail(manifest_.root_board, Phase::Player,
-                 "SGF verified-state table does not cover every bound TT record: SGF=" +
-                     std::to_string(verified_states_.size()) + ", TT=" +
-                     std::to_string(expected_tt_records));
-        }
         statistics_.verified_exact_states = verified_states_.size();
-        statistics_.tt_records_cross_checked = expected_tt_records;
-        if (rzone_source_count_ != rzone_maximum_id_) {
-            fail(manifest_.root_board, Phase::Player,
-                 "SGF RZone source table does not cover every bound certificate: SGF=" +
-                     std::to_string(rzone_source_count_) + ", RZone=" +
-                     std::to_string(rzone_maximum_id_));
-        }
-        statistics_.rzone_records_cross_checked = rzone_source_count_;
         return statistics_;
     }
+
+    const std::unordered_map<StateKey, VerifiedExactSource, StateKeyHash>&
+    exactSources() const
+    {
+        return verified_states_;
+    }
+
+    const std::vector<bool>& rzoneSources() const { return rzone_sources_; }
 
 private:
     [[noreturn]] void fail(Board board, Phase phase, const std::string& message) const
@@ -1071,11 +1072,7 @@ private:
             !record.skipped_actions.empty()) {
             fail(board, record.phase, "TT leaf metadata or child counts are inconsistent");
         }
-        if (!record.tt_source_node_id) {
-            fail(board, record.phase,
-                 "single-opening verification requires a trace-local TT source node");
-        }
-        if (*record.tt_source_node_id >= implicit_node_id) {
+        if (record.tt_source_node_id && *record.tt_source_node_id >= implicit_node_id) {
             fail(board, record.phase, "trace TT source must be an earlier implicit preorder node ID");
         }
 
@@ -1088,21 +1085,36 @@ private:
             fail(board, record.phase, "TT leaf outcome differs from the supplied TT entry");
         }
 
-        const auto source = verified_by_id_.find(*record.tt_source_node_id);
-        if (source == verified_by_id_.end()) {
-            fail(board, record.phase,
-                 "TT source node is absent, incomplete, active, or not a verified Win source");
+        const VerifiedExactSource* verified = nullptr;
+        if (record.tt_source_node_id) {
+            const auto source = verified_by_id_.find(*record.tt_source_node_id);
+            if (source == verified_by_id_.end()) {
+                fail(board, record.phase,
+                     "TT source node is absent, incomplete, active, or not a verified Win source");
+            }
+            verified = &source->second;
+        } else {
+            if (!manifest_.persistent_tt_load) {
+                fail(board, record.phase,
+                     "TT leaf without a local source requires persistent TT input");
+            }
+            const auto source = prior_sources_.exact_by_state.find(
+                StateKey{canonical.board.raw, record.phase});
+            if (source == prior_sources_.exact_by_state.end()) {
+                fail(board, record.phase,
+                     "persistent TT leaf has no verified source in an earlier SGF");
+            }
+            verified = &source->second;
         }
-        const VerifiedExactSource& verified = source->second;
-        if (verified.canonical_board != canonical.board.raw ||
-            verified.phase != record.phase ||
-            verified.children_total != legal.size()) {
+        if (verified->canonical_board != canonical.board.raw ||
+            verified->phase != record.phase ||
+            verified->children_total != legal.size()) {
             fail(board, record.phase,
                  "TT source node state, phase, or legal-child count does not match this leaf");
         }
         std::optional<SearchAction> witness;
-        if (verified.canonical_witness) {
-            witness = mapWitnessToCurrent(*verified.canonical_witness, canonical.transform);
+        if (verified->canonical_witness) {
+            witness = mapWitnessToCurrent(*verified->canonical_witness, canonical.transform);
         }
         checkSelected(board, record, witness);
         ++statistics_.tt_source_references_checked;
@@ -1117,6 +1129,15 @@ private:
         if (record.outcome != Outcome::Win || record.tt_source_node_id || !children.empty() ||
             !record.skipped_actions.empty()) {
             fail(board, record.phase, "RZone leaf metadata or child counts are inconsistent");
+        }
+
+        const std::size_t id = static_cast<std::size_t>(entry.id);
+        const bool local_source = id < rzone_sources_.size() && rzone_sources_[id];
+        const bool prior_source = id < prior_sources_.rzone_by_id.size() &&
+            prior_sources_.rzone_by_id[id];
+        if (!local_source && (!manifest_.persistent_rz_load || !prior_source)) {
+            fail(board, record.phase,
+                 "RZone leaf has no completed source in this or an earlier SGF");
         }
 
         std::optional<SearchAction> expected_action;
@@ -1163,9 +1184,9 @@ private:
                 *record.selected_action, canonical.transform);
         }
         const StateKey state{canonical.board.raw, record.phase};
-        if (!verified_states_.insert(state).second) {
+        if (prior_sources_.exact_by_state.count(state) != 0) {
             fail(board, record.phase,
-                 "multiple completed SGF nodes claim to be the first source of one TT state");
+                 "SGF re-proves a state that was declared loaded from an earlier opening");
         }
         const VerifiedExactSource source{
             canonical.board.raw,
@@ -1173,6 +1194,10 @@ private:
             canonical_witness,
             legal.size(),
         };
+        if (!verified_states_.emplace(state, source).second) {
+            fail(board, record.phase,
+                 "multiple completed SGF nodes claim to be the first source of one TT state");
+        }
         if (!verified_by_id_.emplace(implicit_node_id, source).second) {
             fail(board, record.phase, "duplicate implicit SGF node ID in verified source table");
         }
@@ -1237,7 +1262,6 @@ private:
         const RZoneCertificateId id = entry->id;
         if (!rzone_sources_[static_cast<std::size_t>(id)]) {
             rzone_sources_[static_cast<std::size_t>(id)] = true;
-            ++rzone_source_count_;
         }
         ++statistics_.rzone_source_annotations_checked;
     }
@@ -1310,11 +1334,11 @@ private:
     const ProofTable& table_;
     const RzProofTable* rzone_table_ = nullptr;
     RZoneCertificateId rzone_maximum_id_ = kNoRZoneCertificate;
+    const VerifiedSourceTables& prior_sources_;
     TraceVerificationStatistics statistics_;
     std::unordered_map<std::uint64_t, VerifiedExactSource> verified_by_id_;
-    std::unordered_set<StateKey, StateKeyHash> verified_states_;
+    std::unordered_map<StateKey, VerifiedExactSource, StateKeyHash> verified_states_;
     std::vector<bool> rzone_sources_;
-    std::uint64_t rzone_source_count_ = 0;
 };
 
 } // namespace
@@ -1513,6 +1537,16 @@ ProofManifest readProofManifest(const std::filesystem::path& sgf_path)
         manifest.persistent_rz_load = parseEnabled(
             persistent_rz_load->second, "persistent_rz_load", sgf_path);
     }
+    auto parseCounter = [&](const char* name, std::uint64_t& destination) {
+        const auto found = fields.find(name);
+        if (found != fields.end()) {
+            destination = parseUnsigned<std::uint64_t>(found->second, name, sgf_path);
+        }
+    };
+    parseCounter("player_tt_loaded_entries", manifest.player_tt_loaded_entries);
+    parseCounter(
+        "environment_tt_loaded_entries", manifest.environment_tt_loaded_entries);
+    parseCounter("rzone_loaded_certificates", manifest.rzone_loaded_certificates);
     const auto rzone_symmetry = fields.find("rzone_symmetry");
     if (rzone_symmetry != fields.end()) {
         manifest.rzone_symmetry = parseEnabled(
@@ -1591,18 +1625,19 @@ ProofVerificationResult verifyRootProof(const ProofManifest& manifest,
     return result;
 }
 
-SgfProofVerificationResult verifySgfProof(const std::filesystem::path& sgf_path,
-                                          const ProofManifest& manifest,
-                                          const ProofTable& table,
-                                          const RzProofTable* rzone_table)
+namespace {
+
+SgfProofVerificationResult verifySgfAgainstPriorSources(
+    const std::filesystem::path& sgf_path,
+    const ProofManifest& manifest,
+    const ProofTable& table,
+    const RzProofTable* rzone_table,
+    bool exact_tt_binding,
+    bool require_tt_binding,
+    VerifiedSourceTables& prior_sources)
 {
     if (manifest.root_outcome == Outcome::Unknown) {
         throw std::runtime_error("root outcome is UNKNOWN and cannot be verified as an exact proof");
-    }
-    if (manifest.persistent_tt_load || manifest.persistent_rz_load) {
-        throw std::runtime_error(
-            "SGF-backed source verification currently supports only one-opening artifacts "
-            "without persistent TT/RZone input");
     }
     if (manifest.winning_tile != table.winningTile()) {
         throw std::runtime_error("SGF winning tile does not match TT file");
@@ -1610,7 +1645,55 @@ SgfProofVerificationResult verifySgfProof(const std::filesystem::path& sgf_path,
     if (manifest.tt_symmetry != table.usesSymmetry()) {
         throw std::runtime_error("SGF TT symmetry mode does not match TT file");
     }
-    const bool artifact_binding_verified = verifyTtArtifactBinding(manifest, table);
+
+    if (manifest.persistent_tt_load) {
+        if (manifest.player_tt_loaded_entries != prior_sources.player_exact_states ||
+            manifest.environment_tt_loaded_entries !=
+                prior_sources.environment_exact_states) {
+            fileFail(
+                sgf_path,
+                "persistent TT loaded-entry counts do not match sources verified from "
+                "earlier SGFs");
+        }
+    } else if (manifest.player_tt_loaded_entries != 0 ||
+               manifest.environment_tt_loaded_entries != 0) {
+        fileFail(sgf_path, "TT loaded-entry counters are nonzero while persistent load is disabled");
+    }
+    if (manifest.persistent_rz_load) {
+        if (manifest.rzone_loaded_certificates != prior_sources.rzone_sources) {
+            fileFail(
+                sgf_path,
+                "persistent RZone loaded-certificate count does not match sources verified "
+                "from earlier SGFs");
+        }
+    } else if (manifest.rzone_loaded_certificates != 0) {
+        fileFail(
+            sgf_path,
+            "RZone loaded-certificate counter is nonzero while persistent load is disabled");
+    }
+
+    bool artifact_binding_verified = false;
+    if (exact_tt_binding) {
+        if (require_tt_binding && !manifest.hasArtifactBinding()) {
+            fileFail(
+                sgf_path,
+                "the final SGF in a multi-opening proof must bind the final TT snapshot");
+        }
+        artifact_binding_verified = verifyTtArtifactBinding(manifest, table);
+    } else {
+        if (require_tt_binding && !manifest.hasArtifactBinding()) {
+            fileFail(sgf_path, "multi-opening verification requires a bound TT output manifest");
+        }
+        if (manifest.hasArtifactBinding()) {
+            if (*manifest.tt_format_version != TtFile::kFormatVersion ||
+                *manifest.tt_player_records > table.summary().player_entries ||
+                *manifest.tt_environment_records > table.summary().environment_entries) {
+                fileFail(
+                    sgf_path,
+                    "intermediate TT manifest is incompatible with the final TT snapshot");
+            }
+        }
+    }
     const bool rzone_artifact_binding_verified =
         verifyRzArtifactBinding(manifest, rzone_table);
     const RZoneCertificateId rzone_maximum_id = rzone_artifact_binding_verified
@@ -1647,16 +1730,182 @@ SgfProofVerificationResult verifySgfProof(const std::filesystem::path& sgf_path,
         manifest,
         table,
         rzone_artifact_binding_verified ? rzone_table : nullptr,
-        rzone_maximum_id);
-    const TraceVerificationStatistics statistics = verifier.verify(root_properties);
+        rzone_maximum_id,
+        prior_sources);
+    TraceVerificationStatistics statistics = verifier.verify(root_properties);
     parser.expect(')');
     parser.expectEnd();
+
+    std::uint64_t new_player_states = 0;
+    std::uint64_t new_environment_states = 0;
+    for (const auto& source : verifier.exactSources()) {
+        if (source.first.phase == Phase::Player) ++new_player_states;
+        else ++new_environment_states;
+    }
+    const std::uint64_t prospective_player =
+        prior_sources.player_exact_states + new_player_states;
+    const std::uint64_t prospective_environment =
+        prior_sources.environment_exact_states + new_environment_states;
+    if (manifest.hasArtifactBinding() &&
+        (*manifest.tt_player_records != prospective_player ||
+         *manifest.tt_environment_records != prospective_environment)) {
+        fileFail(
+            sgf_path,
+            "TT output record counts do not equal earlier sources plus this SGF's new sources");
+    }
+
+    for (std::uint64_t raw_id = 1; raw_id <= rzone_maximum_id; ++raw_id) {
+        const RZoneCertificateId id = static_cast<RZoneCertificateId>(raw_id);
+        const std::size_t index = static_cast<std::size_t>(id);
+        const bool prior = index < prior_sources.rzone_by_id.size() &&
+            prior_sources.rzone_by_id[index];
+        const bool local = index < verifier.rzoneSources().size() &&
+            verifier.rzoneSources()[index];
+        if (!prior && !local) {
+            fileFail(
+                sgf_path,
+                "SGF sequence has no verified source for bound RZone certificate " +
+                    std::to_string(id));
+        }
+    }
+
+    for (const auto& source : verifier.exactSources()) {
+        if (!prior_sources.exact_by_state.emplace(source.first, source.second).second) {
+            fileFail(sgf_path, "duplicate exact proof source across SGFs");
+        }
+    }
+    prior_sources.player_exact_states = prospective_player;
+    prior_sources.environment_exact_states = prospective_environment;
+    if (prior_sources.rzone_by_id.size() <
+        static_cast<std::size_t>(rzone_maximum_id) + 1) {
+        prior_sources.rzone_by_id.resize(
+            static_cast<std::size_t>(rzone_maximum_id) + 1, false);
+    }
+    std::uint64_t new_rzone_sources = 0;
+    for (std::uint64_t raw_id = 1; raw_id <= rzone_maximum_id; ++raw_id) {
+        const std::size_t index = static_cast<std::size_t>(raw_id);
+        if (!prior_sources.rzone_by_id[index]) {
+            prior_sources.rzone_by_id[index] = true;
+            ++new_rzone_sources;
+        }
+    }
+    if (rzone_artifact_binding_verified &&
+        rzone_maximum_id != prior_sources.rzone_sources + new_rzone_sources) {
+        fileFail(
+            sgf_path,
+            "RZone output record count does not equal earlier sources plus this SGF's new sources");
+    }
+    prior_sources.rzone_sources += new_rzone_sources;
+
+    statistics.tt_records_cross_checked =
+        prospective_player + prospective_environment;
+    statistics.rzone_records_cross_checked = prior_sources.rzone_sources;
     SgfProofVerificationResult result;
     result.root_outcome = manifest.root_outcome;
     result.artifact_binding_verified = artifact_binding_verified;
     result.rzone_artifact_binding_verified = rzone_artifact_binding_verified;
     result.statistics = statistics;
     return result;
+}
+
+void accumulateTraceStatistics(TraceVerificationStatistics& total,
+                               const TraceVerificationStatistics& current)
+{
+    total.nodes_checked += current.nodes_checked;
+    total.actions_replayed += current.actions_replayed;
+    total.terminal_nodes_checked += current.terminal_nodes_checked;
+    total.backpropagation_nodes_checked += current.backpropagation_nodes_checked;
+    total.tt_leaves_checked += current.tt_leaves_checked;
+    total.rzone_leaves_checked += current.rzone_leaves_checked;
+    total.rzone_annotations_checked += current.rzone_annotations_checked;
+    total.node_limit_leaves_checked += current.node_limit_leaves_checked;
+    total.skipped_actions_checked += current.skipped_actions_checked;
+    total.maximum_depth = std::max(total.maximum_depth, current.maximum_depth);
+    total.verified_exact_source_nodes += current.verified_exact_source_nodes;
+    total.verified_exact_states += current.verified_exact_states;
+    total.tt_source_references_checked += current.tt_source_references_checked;
+    total.rzone_source_annotations_checked += current.rzone_source_annotations_checked;
+}
+
+} // namespace
+
+SgfProofVerificationResult verifySgfProof(const std::filesystem::path& sgf_path,
+                                          const ProofManifest& manifest,
+                                          const ProofTable& table,
+                                          const RzProofTable* rzone_table)
+{
+    VerifiedSourceTables sources;
+    const RZoneCertificateId rzone_count = rzone_table
+        ? static_cast<RZoneCertificateId>(rzone_table->summary().record_count)
+        : kNoRZoneCertificate;
+    sources.rzone_by_id.resize(static_cast<std::size_t>(rzone_count) + 1, false);
+    SgfProofVerificationResult result = verifySgfAgainstPriorSources(
+        sgf_path, manifest, table, rzone_table, true, false, sources);
+    const std::uint64_t expected_tt_records = manifest.transposition_table
+        ? table.summary().entries()
+        : 0;
+    if (sources.player_exact_states + sources.environment_exact_states !=
+        expected_tt_records) {
+        fileFail(
+            sgf_path,
+            "SGF verified-state table does not cover every supplied TT record");
+    }
+    result.statistics.tt_records_cross_checked = expected_tt_records;
+    return result;
+}
+
+ProofSequenceVerificationResult verifySgfProofSequence(
+    const std::vector<std::filesystem::path>& sgf_paths,
+    const ProofTable& table,
+    const RzProofTable* rzone_table)
+{
+    if (sgf_paths.empty()) {
+        throw std::invalid_argument("multi-opening verification requires at least one SGF");
+    }
+
+    VerifiedSourceTables sources;
+    const std::uint64_t raw_rzone_count =
+        rzone_table ? rzone_table->summary().record_count : 0;
+    if (raw_rzone_count > std::numeric_limits<RZoneCertificateId>::max()) {
+        throw std::runtime_error("final RZone record count exceeds the certificate ID space");
+    }
+    sources.rzone_by_id.resize(static_cast<std::size_t>(raw_rzone_count) + 1, false);
+
+    ProofSequenceVerificationResult sequence;
+    sequence.openings.reserve(sgf_paths.size());
+    std::unordered_set<std::string> unique_paths;
+    for (std::size_t index = 0; index < sgf_paths.size(); ++index) {
+        const std::string normalized_path =
+            std::filesystem::absolute(sgf_paths[index]).lexically_normal().string();
+        if (!unique_paths.emplace(normalized_path).second) {
+            fileFail(sgf_paths[index], "duplicate SGF in proof sequence");
+        }
+        const ProofManifest manifest = readProofManifest(sgf_paths[index]);
+        const bool final_opening = index + 1 == sgf_paths.size();
+        SgfProofVerificationResult result = verifySgfAgainstPriorSources(
+            sgf_paths[index],
+            manifest,
+            table,
+            rzone_table,
+            final_opening,
+            sgf_paths.size() > 1,
+            sources);
+        accumulateTraceStatistics(sequence.aggregate_statistics, result.statistics);
+        sequence.openings.push_back(std::move(result));
+    }
+
+    if (sources.player_exact_states != table.summary().player_entries ||
+        sources.environment_exact_states != table.summary().environment_entries) {
+        throw std::runtime_error(
+            "verified SGF sequence does not cover every record in the final TT snapshot");
+    }
+    if (rzone_table && sources.rzone_sources != rzone_table->summary().record_count) {
+        throw std::runtime_error(
+            "verified SGF sequence does not cover every record in the final RZone snapshot");
+    }
+    sequence.aggregate_statistics.tt_records_cross_checked = table.summary().entries();
+    sequence.aggregate_statistics.rzone_records_cross_checked = sources.rzone_sources;
+    return sequence;
 }
 
 TraceVerificationStatistics verifySgfTrace(const std::filesystem::path& sgf_path,

@@ -7,11 +7,12 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 namespace {
 
 struct CommandLine {
-    std::filesystem::path sgf_path;
+    std::vector<std::filesystem::path> sgf_paths;
     std::filesystem::path tt_path;
     std::filesystem::path rz_path;
     bool help = false;
@@ -31,8 +32,7 @@ CommandLine parseCommandLine(int argc, char** argv)
         }
         if (++index >= argc) throw std::invalid_argument("missing value after " + option);
         if (option == "--sgf") {
-            if (!command.sgf_path.empty()) throw std::invalid_argument("--sgf may only be specified once");
-            command.sgf_path = argv[index];
+            command.sgf_paths.emplace_back(argv[index]);
         } else if (option == "--tt") {
             if (!command.tt_path.empty()) throw std::invalid_argument("--tt may only be specified once");
             command.tt_path = argv[index];
@@ -41,7 +41,7 @@ CommandLine parseCommandLine(int argc, char** argv)
             command.rz_path = argv[index];
         }
     }
-    if (command.sgf_path.empty()) throw std::invalid_argument("--sgf is required");
+    if (command.sgf_paths.empty()) throw std::invalid_argument("--sgf is required");
     if (command.tt_path.empty()) throw std::invalid_argument("--tt is required");
     return command;
 }
@@ -49,12 +49,14 @@ CommandLine parseCommandLine(int argc, char** argv)
 void printHelp(const char* program)
 {
     std::cout
-        << "Usage: " << program << " --sgf PATH --tt PATH [--rz PATH]\n\n"
+        << "Usage: " << program
+        << " --sgf PATH [--sgf PATH ...] --tt FINAL_PATH [--rz FINAL_PATH]\n\n"
         << "Verify the exact root Win/Loss proof declared by a solver SGF against a\n"
         << "persistent TT snapshot and, when bound by the SGF, an RZone snapshot.\n"
         << "The checker audits every retained SGF DFS node, independently replays\n"
         << "actions and AND/OR backup rules, builds a verified SGF source table,\n"
-        << "and cross-checks every TT/RZone record without replaying a second DAG.\n";
+        << "and cross-checks every TT/RZone record without replaying a second DAG.\n"
+        << "When --sgf is repeated, paths must be in chronological solve order.\n";
 }
 
 const char* proofOutcomeName(solver2048::Outcome outcome)
@@ -75,10 +77,13 @@ int main(int argc, char** argv)
             return 0;
         }
 
-        const solver2048::ProofManifest manifest =
-            solver2048::readProofManifest(command.sgf_path);
-        if (manifest.hasRzArtifactBinding() && command.rz_path.empty()) {
-            throw std::invalid_argument("--rz is required because the SGF binds an RZone prefix");
+        std::optional<solver2048::ProofManifest> single_manifest;
+        if (command.sgf_paths.size() == 1) {
+            single_manifest = solver2048::readProofManifest(command.sgf_paths.front());
+            if (single_manifest->hasRzArtifactBinding() && command.rz_path.empty()) {
+                throw std::invalid_argument(
+                    "--rz is required because the SGF binds an RZone prefix");
+            }
         }
 
         const auto load_started = std::chrono::steady_clock::now();
@@ -96,12 +101,20 @@ int main(int argc, char** argv)
 
         const auto verify_started = std::chrono::steady_clock::now();
         const solver2048::RzProofTable* rzone = rzone_table ? &*rzone_table : nullptr;
-        const solver2048::SgfProofVerificationResult result =
-            solver2048::verifySgfProof(command.sgf_path, manifest, table, rzone);
+        solver2048::ProofSequenceVerificationResult sequence;
+        if (command.sgf_paths.size() == 1) {
+            sequence.openings.push_back(solver2048::verifySgfProof(
+                command.sgf_paths.front(), *single_manifest, table, rzone));
+            sequence.aggregate_statistics = sequence.openings.front().statistics;
+        } else {
+            sequence = solver2048::verifySgfProofSequence(
+                command.sgf_paths, table, rzone);
+        }
         const double verify_elapsed = std::chrono::duration<double>(
             std::chrono::steady_clock::now() - verify_started).count();
 
-        const auto& trace = result.statistics;
+        const auto& result = sequence.openings.back();
+        const auto& trace = sequence.aggregate_statistics;
         std::cout << "TT integrity: PASS\n"
                   << "RZone integrity: " << (rzone_table ? "PASS" : "NOT SUPPLIED") << '\n'
                   << "SGF root manifest: PASS\n"
@@ -118,6 +131,22 @@ int main(int argc, char** argv)
                   << "Root outcome: " << proofOutcomeName(result.root_outcome) << '\n'
                   << "Proof status: VERIFIED\n"
                   << "Verification model: SGF_SOURCE_TABLE\n"
+                  << "SGFs verified: " << sequence.openings.size() << '\n';
+        if (sequence.openings.size() > 1) {
+            for (std::size_t index = 0; index < sequence.openings.size(); ++index) {
+                const auto& opening = sequence.openings[index];
+                std::cout << "Opening " << index + 1 << ": outcome="
+                          << proofOutcomeName(opening.root_outcome)
+                          << " trace_nodes=" << opening.statistics.nodes_checked
+                          << " new_exact_sources="
+                          << opening.statistics.verified_exact_states
+                          << " cumulative_tt_records="
+                          << opening.statistics.tt_records_cross_checked
+                          << " cumulative_rzone_records="
+                          << opening.statistics.rzone_records_cross_checked << '\n';
+            }
+        }
+        std::cout
                   << "Verified exact source nodes: "
                   << trace.verified_exact_source_nodes << '\n'
                   << "Verified exact states: " << trace.verified_exact_states << '\n'

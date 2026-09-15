@@ -251,6 +251,18 @@ solver/proof_checker \
   --rz result/RZ/8_RZ.rz
 ```
 
+For an append/reuse chain, pass every SGF in chronological order and supply
+the final TT/RZone snapshots:
+
+```bash
+solver/proof_checker \
+  --sgf result/opening-001.sgf \
+  --sgf result/opening-002.sgf \
+  --sgf result/opening-003.sgf \
+  --tt result/final.tt \
+  --rz result/final.rz
+```
+
 The checker reopens all supplied files and independently validates both binary
 formats, checksums, and RZone certificate semantics. It streams the entire SGF
 DFS trace, independently replays every slide and placement, and verifies
@@ -271,10 +283,16 @@ Player/Environment record counts. RZone binding instead uses format/semantics
 versions plus a record-prefix count and checksum. A later `.rz` containing that
 same prefix is valid, enabling append-only cross-opening reuse; SGF certificate
 IDs cannot exceed the bound prefix. Older SGFs without RZone data continue to
-verify without `--rz`. This SGF-source-table mode currently rejects artifacts
-that loaded persistent TT/RZone records from another opening; cross-opening
-proof provenance requires the future persistent proof database described in
-`proof_checker_behavior.txt`.
+verify without `--rz`. In multi-opening mode, each SGF is replayed exactly once.
+Trace-local TT references may use only completed sources in the current SGF;
+persistent TT/RZone references may use only sources established by earlier
+SGFs. Declared loaded-entry counts must equal the accumulated earlier sources,
+and declared output counts must equal earlier plus newly verified sources. The
+last SGF is bound exactly to the supplied final TT checksum. Earlier TT
+snapshots need not remain on disk: their manifests are checked as cumulative
+lineage counts because TT serialization is not prefix-stable. Every RZone
+manifest is checked directly against the supplied final append-only prefix.
+The final TT and RZone must be fully covered by the ordered SGF sequence.
 
 ## Results
 

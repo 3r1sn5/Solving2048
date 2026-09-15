@@ -9,6 +9,7 @@
 #include <filesystem>
 #include <optional>
 #include <unordered_map>
+#include <vector>
 
 namespace solver2048 {
 
@@ -46,6 +47,9 @@ struct ProofManifest {
     bool rzone_symmetry = false;
     bool persistent_tt_load = false;
     bool persistent_rz_load = false;
+    std::uint64_t player_tt_loaded_entries = 0;
+    std::uint64_t environment_tt_loaded_entries = 0;
+    std::uint64_t rzone_loaded_certificates = 0;
     std::filesystem::path declared_tt_path;
     std::optional<std::uint16_t> tt_format_version;
     std::optional<std::uint64_t> tt_payload_checksum;
@@ -112,9 +116,19 @@ struct SgfProofVerificationResult {
     TraceVerificationStatistics statistics;
 };
 
+struct ProofSequenceVerificationResult {
+    std::vector<SgfProofVerificationResult> openings;
+    TraceVerificationStatistics aggregate_statistics;
+};
+
 SgfProofVerificationResult verifySgfProof(
     const std::filesystem::path& sgf_path,
     const ProofManifest& manifest,
+    const ProofTable& table,
+    const RzProofTable* rzone_table = nullptr);
+
+ProofSequenceVerificationResult verifySgfProofSequence(
+    const std::vector<std::filesystem::path>& sgf_paths,
     const ProofTable& table,
     const RzProofTable* rzone_table = nullptr);
 

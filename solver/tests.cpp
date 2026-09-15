@@ -2095,6 +2095,46 @@ void testRealGameApiAndThreeNodeSearch()
         },
         "SGF source-table checker must reject an SGF/TT checksum binding mismatch");
 
+    TraceNode persistent_root;
+    persistent_root.phase = Phase::Player;
+    persistent_root.outcome = Outcome::Win;
+    persistent_root.solved_by = SolvedBy::TranspositionTable;
+    persistent_root.tt_hit = true;
+    persistent_root.tt_persistent_hit = true;
+    persistent_root.children_total = symmetry_result.root->children_total;
+    persistent_root.selected_action = symmetry_result.root->selected_action;
+    TemporaryTtFile persistent_sgf;
+    SgfMetadata persistent_metadata = proof_metadata;
+    persistent_metadata.load_tt = true;
+    persistent_metadata.statistics = {};
+    persistent_metadata.statistics.player_tt_loaded_entries =
+        proof_summary.player_entries;
+    persistent_metadata.statistics.environment_tt_loaded_entries =
+        proof_summary.environment_entries;
+    SgfWriter::write(persistent_sgf.path, persistent_root, persistent_metadata);
+
+    const solver2048::ProofSequenceVerificationResult sequence_verified =
+        solver2048::verifySgfProofSequence(
+            {proof_sgf.path, persistent_sgf.path}, proof_table);
+    check(sequence_verified.openings.size() == 2 &&
+              sequence_verified.openings[1].root_outcome == Outcome::Win &&
+              sequence_verified.openings[1].statistics.tt_source_references_checked == 1 &&
+              sequence_verified.aggregate_statistics.tt_records_cross_checked ==
+                  proof_summary.entries(),
+          "ordered multi-opening SGF source verification did not reuse the earlier proof");
+    checkThrows(
+        [&] {
+            (void)solver2048::verifySgfProofSequence(
+                {persistent_sgf.path, proof_sgf.path}, proof_table);
+        },
+        "multi-opening checker must reject SGFs supplied out of chronological order");
+    checkThrows(
+        [&] {
+            (void)solver2048::verifySgfProofSequence(
+                {proof_sgf.path, proof_sgf.path}, proof_table);
+        },
+        "multi-opening checker must reject a duplicate SGF path");
+
     TemporaryTtFile rzone_proof_tt;
     const TtFileSummary rzone_tt_summary =
         TtFile::save(rzone_proof_tt.path, active_rzone_solver);
@@ -2147,6 +2187,100 @@ void testRealGameApiAndThreeNodeSearch()
               mixed_trace.rzone_source_annotations_checked >=
                   mixed_trace.rzone_records_cross_checked,
           "RZone SGF source-table audit must verify certificate leaves, sources, and records");
+
+    std::array<unsigned, 16> trivial_rzone_opening{};
+    trivial_rzone_opening[0] = 4;
+    trivial_rzone_opening[1] = 4;
+    const Board trivial_rzone_board =
+        solver2048::boardFromTiles(trivial_rzone_opening);
+    FakeGame trivial_rzone_game(trivial_rzone_board.raw);
+    trivial_rzone_game.tile_values[trivial_rzone_board.raw] = trivial_rzone_opening;
+    trivial_rzone_game.slides[trivial_rzone_board.raw] =
+        solver2048::generateLegalSlides(trivial_rzone_board);
+    for (const SlideResult& candidate :
+         trivial_rzone_game.slides[trivial_rzone_board.raw]) {
+        trivial_rzone_game.tile_values[candidate.afterstate.raw] =
+            solver2048::boardTileValues(candidate.afterstate);
+        trivial_rzone_game.values[candidate.afterstate.raw] =
+            candidate.direction == Direction::Right ? 100.0 : 0.0;
+        if (candidate.direction == Direction::Right) {
+            trivial_rzone_game.winning_states.insert(candidate.afterstate.raw);
+        }
+    }
+    SolverOptions trivial_rzone_options{8, 0, 0, true, false};
+    trivial_rzone_options.rzone_mode = RZoneMode::Lookup;
+    Solver trivial_rzone_solver(trivial_rzone_game, trivial_rzone_options);
+    SearchResult trivial_rzone_result = trivial_rzone_solver.solve();
+    check(trivial_rzone_result.outcome == Outcome::Win &&
+              trivial_rzone_result.root->rzone_certificate_id.has_value(),
+          "trivial target-8 root must produce an RZone certificate");
+
+    TemporaryTtFile trivial_rzone_tt;
+    const TtFileSummary trivial_tt_summary =
+        TtFile::save(trivial_rzone_tt.path, trivial_rzone_solver);
+    TemporaryRzFile trivial_rzone_rz;
+    const RzFileSummary trivial_rz_summary =
+        RzFile::save(trivial_rzone_rz.path, trivial_rzone_solver);
+    TemporaryTtFile trivial_rzone_sgf;
+    SgfMetadata trivial_rzone_metadata;
+    trivial_rzone_metadata.winning_tile = 8;
+    trivial_rzone_metadata.use_transposition_table = true;
+    trivial_rzone_metadata.rzone_mode = RZoneMode::Lookup;
+    trivial_rzone_metadata.save_tt = true;
+    trivial_rzone_metadata.tt_path = trivial_rzone_tt.path;
+    trivial_rzone_metadata.tt_format_version = TtFile::kFormatVersion;
+    trivial_rzone_metadata.tt_payload_checksum = trivial_tt_summary.payload_checksum;
+    trivial_rzone_metadata.tt_file_size = trivial_tt_summary.file_size;
+    trivial_rzone_metadata.tt_player_records = trivial_tt_summary.player_entries;
+    trivial_rzone_metadata.tt_environment_records =
+        trivial_tt_summary.environment_entries;
+    trivial_rzone_metadata.save_rz = true;
+    trivial_rzone_metadata.rz_path = trivial_rzone_rz.path;
+    trivial_rzone_metadata.rz_format_version = RzFile::kFormatVersion;
+    trivial_rzone_metadata.rz_semantics_version = RzFile::kSemanticsVersion;
+    trivial_rzone_metadata.rz_prefix_record_count = trivial_rz_summary.record_count;
+    trivial_rzone_metadata.rz_prefix_checksum = trivial_rz_summary.payload_checksum;
+    trivial_rzone_metadata.opening = trivial_rzone_opening;
+    trivial_rzone_metadata.statistics = trivial_rzone_result.statistics;
+    SgfWriter::write(
+        trivial_rzone_sgf.path,
+        *trivial_rzone_result.root,
+        trivial_rzone_metadata);
+
+    TraceNode persistent_rzone_root;
+    persistent_rzone_root.phase = Phase::Player;
+    persistent_rzone_root.outcome = Outcome::Win;
+    persistent_rzone_root.solved_by = SolvedBy::RZoneTable;
+    persistent_rzone_root.rzone_hit = true;
+    persistent_rzone_root.rzone_transform =
+        trivial_rzone_result.root->rzone_transform;
+    persistent_rzone_root.rzone_certificate_id =
+        trivial_rzone_result.root->rzone_certificate_id;
+    persistent_rzone_root.selected_action = trivial_rzone_result.root->selected_action;
+    persistent_rzone_root.children_total = trivial_rzone_result.root->children_total;
+    TemporaryTtFile persistent_rzone_sgf;
+    SgfMetadata persistent_rzone_metadata = trivial_rzone_metadata;
+    persistent_rzone_metadata.load_rz = true;
+    persistent_rzone_metadata.statistics = {};
+    persistent_rzone_metadata.statistics.rzone.loaded_certificates =
+        trivial_rz_summary.record_count;
+    SgfWriter::write(
+        persistent_rzone_sgf.path,
+        persistent_rzone_root,
+        persistent_rzone_metadata);
+
+    const ProofTable trivial_proof_tt = ProofTable::load(trivial_rzone_tt.path);
+    const RzProofTable trivial_proof_rz =
+        RzProofTable::load(trivial_rzone_rz.path);
+    const solver2048::ProofSequenceVerificationResult rzone_sequence =
+        solver2048::verifySgfProofSequence(
+            {trivial_rzone_sgf.path, persistent_rzone_sgf.path},
+            trivial_proof_tt,
+            &trivial_proof_rz);
+    check(rzone_sequence.openings[1].statistics.rzone_leaves_checked == 1 &&
+              rzone_sequence.aggregate_statistics.rzone_records_cross_checked ==
+                  trivial_rz_summary.record_count,
+          "ordered multi-opening verification did not reuse an earlier RZone source");
 
     TemporaryTtFile wrong_rzone_transform_trace;
     std::string wrong_rzone_transform_sgf = readFile(rzone_proof_sgf.path);
