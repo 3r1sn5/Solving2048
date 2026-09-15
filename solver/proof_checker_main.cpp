@@ -53,8 +53,8 @@ void printHelp(const char* program)
         << "Verify the exact root Win/Loss proof declared by a solver SGF against a\n"
         << "persistent TT snapshot and, when bound by the SGF, an RZone snapshot.\n"
         << "The checker audits every retained SGF DFS node, independently replays\n"
-        << "actions and AND/OR backup rules, checks TT/RZone leaves, and verifies\n"
-        << "the complete mixed logical proof DAG.\n";
+        << "actions and AND/OR backup rules, builds a verified SGF source table,\n"
+        << "and cross-checks every TT/RZone record without replaying a second DAG.\n";
 }
 
 const char* proofOutcomeName(solver2048::Outcome outcome)
@@ -96,14 +96,12 @@ int main(int argc, char** argv)
 
         const auto verify_started = std::chrono::steady_clock::now();
         const solver2048::RzProofTable* rzone = rzone_table ? &*rzone_table : nullptr;
-        const solver2048::ProofVerificationResult result =
-            solver2048::verifyRootProof(manifest, table, rzone);
-        const solver2048::TraceVerificationStatistics trace =
-            solver2048::verifySgfTrace(command.sgf_path, manifest, table, rzone);
+        const solver2048::SgfProofVerificationResult result =
+            solver2048::verifySgfProof(command.sgf_path, manifest, table, rzone);
         const double verify_elapsed = std::chrono::duration<double>(
             std::chrono::steady_clock::now() - verify_started).count();
 
-        const auto& stats = result.statistics;
+        const auto& trace = result.statistics;
         std::cout << "TT integrity: PASS\n"
                   << "RZone integrity: " << (rzone_table ? "PASS" : "NOT SUPPLIED") << '\n'
                   << "SGF root manifest: PASS\n"
@@ -119,14 +117,17 @@ int main(int argc, char** argv)
                   << "Complete SGF trace audit: PASS\n"
                   << "Root outcome: " << proofOutcomeName(result.root_outcome) << '\n'
                   << "Proof status: VERIFIED\n"
-                  << "TT records verified: " << stats.tt_records_verified << '\n'
-                  << "Terminal states checked: " << stats.terminal_states_checked << '\n'
-                  << "Witness edges checked: " << stats.witness_edges_checked << '\n'
-                  << "Universal edges checked: " << stats.universal_edges_checked << '\n'
-                  << "RZone certificates used by root proof: "
-                  << stats.rzone_certificates_used << '\n'
-                  << "Memoized verification hits: " << stats.memoized_verification_hits << '\n'
-                  << "Maximum proof depth: " << stats.maximum_depth << '\n'
+                  << "Verification model: SGF_SOURCE_TABLE\n"
+                  << "Verified exact source nodes: "
+                  << trace.verified_exact_source_nodes << '\n'
+                  << "Verified exact states: " << trace.verified_exact_states << '\n'
+                  << "TT source references checked: "
+                  << trace.tt_source_references_checked << '\n'
+                  << "TT records cross-checked: " << trace.tt_records_cross_checked << '\n'
+                  << "RZone source annotations checked: "
+                  << trace.rzone_source_annotations_checked << '\n'
+                  << "RZone records cross-checked: "
+                  << trace.rzone_records_cross_checked << '\n'
                   << "Trace nodes checked: " << trace.nodes_checked << '\n'
                   << "Trace actions replayed: " << trace.actions_replayed << '\n'
                   << "Trace terminal nodes checked: " << trace.terminal_nodes_checked << '\n'

@@ -44,6 +44,8 @@ struct ProofManifest {
     bool transposition_table = false;
     bool tt_symmetry = false;
     bool rzone_symmetry = false;
+    bool persistent_tt_load = false;
+    bool persistent_rz_load = false;
     std::filesystem::path declared_tt_path;
     std::optional<std::uint16_t> tt_format_version;
     std::optional<std::uint64_t> tt_payload_checksum;
@@ -95,7 +97,26 @@ struct TraceVerificationStatistics {
     std::uint64_t node_limit_leaves_checked = 0;
     std::uint64_t skipped_actions_checked = 0;
     std::uint64_t maximum_depth = 0;
+    std::uint64_t verified_exact_source_nodes = 0;
+    std::uint64_t verified_exact_states = 0;
+    std::uint64_t tt_source_references_checked = 0;
+    std::uint64_t tt_records_cross_checked = 0;
+    std::uint64_t rzone_source_annotations_checked = 0;
+    std::uint64_t rzone_records_cross_checked = 0;
 };
+
+struct SgfProofVerificationResult {
+    Outcome root_outcome = Outcome::Unknown;
+    bool artifact_binding_verified = false;
+    bool rzone_artifact_binding_verified = false;
+    TraceVerificationStatistics statistics;
+};
+
+SgfProofVerificationResult verifySgfProof(
+    const std::filesystem::path& sgf_path,
+    const ProofManifest& manifest,
+    const ProofTable& table,
+    const RzProofTable* rzone_table = nullptr);
 
 TraceVerificationStatistics verifySgfTrace(const std::filesystem::path& sgf_path,
                                            const ProofManifest& manifest,

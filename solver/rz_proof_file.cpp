@@ -54,7 +54,12 @@ struct RecordIdentity {
     std::uint8_t phase = 0;
     std::uint8_t argument = 0;
 
-    bool operator==(const RecordIdentity&) const = default;
+    bool operator==(const RecordIdentity& other) const
+    {
+        return masked_board == other.masked_board && child_id == other.child_id &&
+            mask == other.mask && kind == other.kind && phase == other.phase &&
+            argument == other.argument;
+    }
 };
 
 struct RecordIdentityHash {

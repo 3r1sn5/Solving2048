@@ -2039,9 +2039,13 @@ void testRealGameApiAndThreeNodeSearch()
               trace_verified.terminal_nodes_checked != 0 &&
               trace_verified.backpropagation_nodes_checked != 0 &&
               trace_verified.tt_leaves_checked != 0 &&
+              trace_verified.tt_source_references_checked ==
+                  trace_verified.tt_leaves_checked &&
+              trace_verified.verified_exact_states == proof_summary.entries() &&
+              trace_verified.tt_records_cross_checked == proof_summary.entries() &&
               trace_verified.skipped_actions_checked != 0 &&
               trace_verified.maximum_depth != 0,
-          "target-8 complete SGF trace audit statistics are incomplete");
+          "target-8 SGF source-table audit statistics are incomplete");
 
     TemporaryTtFile corrupt_trace;
     std::string corrupt_sgf = readFile(proof_sgf.path);
@@ -2059,7 +2063,22 @@ void testRealGameApiAndThreeNodeSearch()
     }
     checkThrows(
         [&] { (void)solver2048::verifySgfTrace(corrupt_trace.path, proof_manifest, proof_table); },
-        "complete SGF trace audit must reject a TT reference to a non-earlier preorder node");
+        "SGF source-table audit must reject a nonexistent TT source node");
+
+    corrupt_sgf = readFile(proof_sgf.path);
+    const std::size_t ancestor_position = corrupt_sgf.find(source_prefix);
+    const std::size_t ancestor_value = ancestor_position + source_prefix.size();
+    const std::size_t ancestor_end =
+        corrupt_sgf.find_first_not_of("0123456789", ancestor_value);
+    corrupt_sgf.replace(ancestor_value, ancestor_end - ancestor_value, "1");
+    {
+        std::ofstream output(corrupt_trace.path, std::ios::out | std::ios::binary | std::ios::trunc);
+        output << corrupt_sgf;
+        check(static_cast<bool>(output), "cannot write active-ancestor trace fixture");
+    }
+    checkThrows(
+        [&] { (void)solver2048::verifySgfTrace(corrupt_trace.path, proof_manifest, proof_table); },
+        "SGF source-table audit must reject an active ancestor as a TT proof source");
 
     ProofManifest wrong_claim = proof_manifest;
     wrong_claim.root_outcome = Outcome::Loss;
@@ -2069,6 +2088,12 @@ void testRealGameApiAndThreeNodeSearch()
     ++*wrong_binding.tt_payload_checksum;
     checkThrows([&] { (void)solver2048::verifyRootProof(wrong_binding, proof_table); },
                 "proof checker must reject an SGF/TT checksum binding mismatch");
+    checkThrows(
+        [&] {
+            (void)solver2048::verifySgfProof(
+                proof_sgf.path, wrong_binding, proof_table);
+        },
+        "SGF source-table checker must reject an SGF/TT checksum binding mismatch");
 
     TemporaryTtFile rzone_proof_tt;
     const TtFileSummary rzone_tt_summary =
@@ -2117,8 +2142,11 @@ void testRealGameApiAndThreeNodeSearch()
         solver2048::verifySgfTrace(
             rzone_proof_sgf.path, mixed_manifest, mixed_tt, &original_rz);
     check(mixed_trace.rzone_leaves_checked != 0 &&
-              mixed_trace.rzone_annotations_checked >= mixed_trace.rzone_leaves_checked,
-          "RZone SGF trace audit must verify certificate leaves and annotations");
+              mixed_trace.rzone_annotations_checked >= mixed_trace.rzone_leaves_checked &&
+              mixed_trace.rzone_records_cross_checked == rzone_rz_summary.record_count &&
+              mixed_trace.rzone_source_annotations_checked >=
+                  mixed_trace.rzone_records_cross_checked,
+          "RZone SGF source-table audit must verify certificate leaves, sources, and records");
 
     TemporaryTtFile wrong_rzone_transform_trace;
     std::string wrong_rzone_transform_sgf = readFile(rzone_proof_sgf.path);

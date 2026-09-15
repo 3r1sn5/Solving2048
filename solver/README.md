@@ -255,18 +255,26 @@ The checker reopens all supplied files and independently validates both binary
 formats, checksums, and RZone certificate semantics. It streams the entire SGF
 DFS trace, independently replays every slide and placement, and verifies
 terminal classification, phase alternation, AND/OR backup,
-short-circuit/skipped actions, and every retained TT/RZone leaf. It also
-verifies the complete mixed root proof DAG from exact TT entries, terminal
-states, and RZone Win certificates, including D4 witness mapping, cycle
-detection, and memoization. It does not load the N-tuple network or call the
-Solver DFS.
+short-circuit/skipped actions, and every retained TT/RZone leaf. A node becomes
+a reusable proof source only after its complete subtree and backup rule pass.
+Trace-local TT leaves must reference an already completed source with the same
+canonical board and phase; their Player witness comes from that verified SGF
+source rather than from the TT record. Every bound TT key and RZone certificate
+must have a corresponding verified SGF source. RZone binary loading still
+independently checks each certificate's child-first derivation and universal
+pattern semantics once. The normal checker no longer replays a second logical
+proof DAG from the root. It does not load the N-tuple network or call the Solver
+DFS.
 
 New SGFs bind the exact TT snapshot by format version, CRC64, byte size, and
 Player/Environment record counts. RZone binding instead uses format/semantics
 versions plus a record-prefix count and checksum. A later `.rz` containing that
 same prefix is valid, enabling append-only cross-opening reuse; SGF certificate
 IDs cannot exceed the bound prefix. Older SGFs without RZone data continue to
-verify without `--rz`. The trace parser uses memory proportional to DFS depth.
+verify without `--rz`. This SGF-source-table mode currently rejects artifacts
+that loaded persistent TT/RZone records from another opening; cross-opening
+proof provenance requires the future persistent proof database described in
+`proof_checker_behavior.txt`.
 
 ## Results
 
