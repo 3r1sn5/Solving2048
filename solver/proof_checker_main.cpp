@@ -64,7 +64,6 @@ CommandLine parseCommandLine(int argc, char** argv)
     if (command.sgf_paths.empty()) {
         throw std::invalid_argument("--sgf or --sequence is required");
     }
-    if (command.tt_path.empty()) throw std::invalid_argument("--tt is required");
     return command;
 }
 
@@ -72,14 +71,15 @@ void printHelp(const char* program)
 {
     std::cout
         << "Usage: " << program
-        << " --sgf PATH [--sgf PATH ...] --tt FINAL_PATH [--rz FINAL_PATH]\n"
+        << " --sgf PATH [--sgf PATH ...] [--tt FINAL_PATH] [--rz FINAL_PATH]\n"
         << "       " << program << " --sequence PATH\n\n"
         << "Verify the exact root Win/Loss proof declared by a solver SGF against a\n"
         << "persistent TT snapshot and, when bound by the SGF, an RZone snapshot.\n"
         << "The checker audits every retained SGF DFS node, independently replays\n"
         << "actions and AND/OR backup rules, builds a verified SGF source table,\n"
         << "and cross-checks every TT/RZone record without replaying a second DAG.\n"
-        << "When --sgf is repeated, paths must be in chronological solve order.\n";
+        << "When --sgf is repeated, paths must be in chronological solve order.\n"
+        << "--tt may be omitted for a single SGF with transposition tables disabled.\n";
 }
 
 const char* proofOutcomeName(solver2048::Outcome outcome)
@@ -110,7 +110,13 @@ int main(int argc, char** argv)
         }
 
         const auto load_started = std::chrono::steady_clock::now();
-        const solver2048::ProofTable table = solver2048::ProofTable::load(command.tt_path);
+        if (command.tt_path.empty() &&
+            (!single_manifest || single_manifest->transposition_table)) {
+            throw std::invalid_argument("--tt is required for TT-enabled or multi-SGF proofs");
+        }
+        const solver2048::ProofTable table = command.tt_path.empty()
+            ? solver2048::ProofTable::empty(single_manifest->winning_tile)
+            : solver2048::ProofTable::load(command.tt_path);
         const double tt_load_elapsed = std::chrono::duration<double>(
             std::chrono::steady_clock::now() - load_started).count();
         std::optional<solver2048::RzProofTable> rzone_table;
@@ -138,11 +144,12 @@ int main(int argc, char** argv)
 
         const auto& result = sequence.openings.back();
         const auto& trace = sequence.aggregate_statistics;
-        std::cout << "TT integrity: PASS\n"
+        std::cout << "TT integrity: " << (command.tt_path.empty() ? "NOT SUPPLIED" : "PASS") << '\n'
                   << "RZone integrity: " << (rzone_table ? "PASS" : "NOT SUPPLIED") << '\n'
                   << "SGF root manifest: PASS\n"
                   << "Artifact binding: "
-                  << (result.artifact_binding_verified ? "PASS" : "UNAVAILABLE (legacy/unbound SGF)")
+                  << (command.tt_path.empty() ? "NOT APPLICABLE (TT disabled)" :
+                      result.artifact_binding_verified ? "PASS" : "UNAVAILABLE (legacy/unbound SGF)")
                   << '\n'
                   << "RZone prefix binding: "
                   << (result.rzone_artifact_binding_verified

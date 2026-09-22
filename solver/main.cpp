@@ -808,6 +808,8 @@ int main(int argc, char** argv)
         if (settings.rzone_mode != RZoneMode::Disabled) {
             const RZoneStatistics& rzone = result.statistics.rzone;
             std::cout << "RZone loaded certificates: " << rzone.loaded_certificates << '\n'
+                      << "RZone full-board placement certificates: "
+                      << rzone.full_board_placement_certificates << '\n'
                       << "RZone new certificates: " << rzone.patterns_stored << '\n'
                       << "RZone duplicate certificates: " << rzone.duplicate_patterns << '\n'
                       << "RZone terminal certificates: " << rzone.terminal_certificates << '\n'

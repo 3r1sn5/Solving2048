@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Solving2048 Search Atlas</title>
+  <link rel="stylesheet" href="viewer.css?v=20260918.2">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand"><strong>Search Atlas</strong><span id="dataset">Connecting to viewer server…</span></div>
+    <div class="controls">
+      <button id="root-trajectory" type="button">Root trajectory</button>
+      <button id="fit" type="button">Fit complete tree</button>
+      <button id="zoom-out" type="button">−</button>
+      <span id="zoom">1×</span>
+      <button id="zoom-in" type="button">＋</button>
+      <form id="jump-form"><input id="jump-id" type="number" min="1" placeholder="Node ID"><button>Jump</button></form>
+    </div>
+  </header>
+
+  <section class="summary" id="summary"></section>
+
+  <main class="workspace">
+    <section class="tree-panel">
+      <div class="tree-heading">
+        <div><strong>Complete DFS search map</strong><span id="viewport-status">Loading…</span></div>
+        <div class="legend">
+          <span><i class="player"></i>Player</span><span><i class="environment"></i>Environment</span>
+          <span><i class="terminal"></i>Terminal</span><span><i class="rz"></i>RZone</span><span><i class="tt"></i>TT hit</span>
+        </div>
+      </div>
+      <div class="canvas-wrap" id="canvas-wrap">
+        <canvas id="tree" tabindex="0" aria-label="Fully expanded viewport-lazy search tree"></canvas>
+        <div class="axis-label axis-x">DFS visit order →</div>
+        <div class="axis-label axis-y">Search depth →</div>
+        <div id="loading" class="loading" hidden>Loading viewport…</div>
+      </div>
+      <div class="help">Click a node to select · drag to pan · wheel to zoom · ↑ parent · ↓ first child · ←/→ siblings · Home root.</div>
+    </section>
+
+    <aside class="inspector">
+      <div class="inspector-heading"><div><strong>Node inspector</strong><span id="selected-label">Select a point in the tree</span></div><span id="selected-status" class="badge">—</span></div>
+      <div class="inspector-scroll">
+        <section>
+          <div class="board-title"><strong>Board</strong><span>RZone cells are outlined when available.</span></div>
+          <div id="board" class="board"></div>
+          <div class="board-legend"><span><i class="zone-cell"></i>RZone</span><span><i class="required-empty"></i>Required empty</span></div>
+        </section>
+        <section><h2>Search node</h2><dl id="node-details" class="facts"></dl><div class="inline-actions"><button id="go-parent" disabled>Parent</button><button id="go-tt" disabled>TT source</button><button id="center-node" disabled>Center</button></div></section>
+        <section><div class="section-heading"><h2>RZone certificate</h2><span id="rz-label">—</span></div><dl id="rz-details" class="facts"></dl></section>
+        <section><div class="section-heading"><h2>RZone proof chain</h2><span id="proof-count">0 steps</span></div><div id="proof-chain" class="proof-chain"><div class="empty">No RZone certificate selected.</div></div></section>
+        <section><div class="section-heading"><h2>Path</h2><span id="path-count">0 nodes</span></div><div id="path" class="path"><div class="empty">No node selected.</div></div></section>
+      </div>
+    </aside>
+  </main>
+  <script type="module" src="viewer.js?v=20260918.2"></script>
+</body>
+</html>

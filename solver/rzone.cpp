@@ -333,6 +333,36 @@ std::optional<RZoneCertificateId> RZoneTable::liftUniversalPlacement(
     return id;
 }
 
+std::optional<RZoneCertificateId> RZoneTable::liftFullBoardPlacement(
+    Board parent, const std::vector<RZoneMatch>& children)
+{
+    if (max_cells_ < 16) return std::nullopt;
+    const auto placements = game_.legalPlacements(parent);
+    if (placements.empty() || placements.size() != children.size()) return std::nullopt;
+    RZoneCertificate certificate;
+    certificate.kind = RZoneStepKind::FullBoardPlacement;
+    certificate.phase = Phase::Environment;
+    certificate.winning_tile = winning_tile_;
+    certificate.mask = 0xffff;
+    certificate.masked_board = parent.raw;
+    for (std::size_t index = 0; index < placements.size(); ++index) {
+        const auto& match = children[index];
+        const auto* child = find(match.id);
+        if (!child || !child->validated || child->phase != Phase::Player ||
+            child->winning_tile != winning_tile_ || match.transform >= 8 ||
+            maskedBoard(transformBoard(placements[index].board, match.transform), child->mask) !=
+                child->masked_board || child->depth == std::numeric_limits<unsigned>::max()) {
+            return std::nullopt;
+        }
+        certificate.child = std::max(certificate.child, child->id);
+        certificate.depth = std::max(certificate.depth, child->depth + 1);
+    }
+    certificate.validated = true;
+    const auto id = publish(certificate);
+    if (id) ++statistics_.full_board_placement_certificates;
+    return id;
+}
+
 std::optional<RZoneMatch> RZoneTable::lookup(Board board, Phase phase)
 {
     ++statistics_.lookups;
@@ -536,6 +566,7 @@ const char* rzoneStepKindName(RZoneStepKind kind)
         case RZoneStepKind::Terminal: return "TERMINAL";
         case RZoneStepKind::FixedSlide: return "FIXED_SLIDE";
         case RZoneStepKind::UniversalPlacement: return "UNIVERSAL_PLACEMENT";
+        case RZoneStepKind::FullBoardPlacement: return "FULL_BOARD_PLACEMENT";
     }
     return "TERMINAL";
 }

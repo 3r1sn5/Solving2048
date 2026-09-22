@@ -26,6 +26,7 @@ enum class RZoneStepKind {
     Terminal,
     FixedSlide,
     UniversalPlacement,
+    FullBoardPlacement,
 };
 
 enum class RZoneLookupPolicy {
@@ -51,6 +52,7 @@ struct RZoneCertificate {
     std::uint64_t masked_board = 0;
     std::optional<Direction> slide;
     int terminal_position = -1;
+    // FullBoardPlacement uses this as an inclusive proof-prefix ID bound.
     RZoneCertificateId child = kNoRZoneCertificate;
     unsigned depth = 0;
     bool validated = false;
@@ -65,6 +67,7 @@ struct RZoneStatistics {
     std::uint64_t placement_lift_attempts = 0;
     std::uint64_t placement_lift_successes = 0;
     std::uint64_t placement_lift_blocked = 0;
+    std::uint64_t full_board_placement_certificates = 0;
     std::uint64_t patterns_stored = 0;
     std::uint64_t duplicate_patterns = 0;
     std::uint64_t lookups = 0;
@@ -108,6 +111,9 @@ public:
     std::optional<RZoneCertificateId> liftUniversalPlacement(
         Board parent,
         RZoneCertificateId child);
+    std::optional<RZoneCertificateId> liftFullBoardPlacement(
+        Board parent,
+        const std::vector<RZoneMatch>& children);
 
     std::optional<RZoneMatch> lookup(Board board, Phase phase);
     std::optional<RZoneMatch> matchCertificate(

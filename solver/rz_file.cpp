@@ -1,3 +1,4 @@
+#include "full_board_proof.h"
 #include "rz_file.h"
 
 #include "rzone.h"
@@ -29,6 +30,7 @@ constexpr std::uint32_t kChecksumAlgorithmCrc64Ecma = 1;
 constexpr std::uint8_t kTerminalKind = 1;
 constexpr std::uint8_t kFixedSlideKind = 2;
 constexpr std::uint8_t kUniversalPlacementKind = 3;
+constexpr std::uint8_t kFullBoardPlacementKind = 4;
 constexpr std::uint8_t kPlayerPhase = 1;
 constexpr std::uint8_t kEnvironmentPhase = 2;
 constexpr std::uint8_t kWinOutcome = 1;
@@ -57,12 +59,13 @@ struct RecordIdentity {
     std::uint8_t kind = 0;
     std::uint8_t phase = 0;
     std::uint8_t argument = 0;
+    std::uint32_t depth = 0;
 
     bool operator==(const RecordIdentity& other) const
     {
         return masked_board == other.masked_board && child_id == other.child_id &&
             mask == other.mask && kind == other.kind && phase == other.phase &&
-            argument == other.argument;
+            argument == other.argument && depth == other.depth;
     }
 };
 
@@ -75,6 +78,7 @@ struct RecordIdentityHash {
         hash ^= static_cast<std::uint64_t>(value.kind) << 16;
         hash ^= static_cast<std::uint64_t>(value.phase) << 8;
         hash ^= value.argument;
+        hash ^= static_cast<std::uint64_t>(value.depth) * 0x517cc1b727220a95ull;
         hash ^= hash >> 33;
         hash *= 0xff51afd7ed558ccdull;
         hash ^= hash >> 33;
@@ -267,6 +271,7 @@ std::uint8_t encodeKind(RZoneStepKind kind)
         case RZoneStepKind::Terminal: return kTerminalKind;
         case RZoneStepKind::FixedSlide: return kFixedSlideKind;
         case RZoneStepKind::UniversalPlacement: return kUniversalPlacementKind;
+        case RZoneStepKind::FullBoardPlacement: return kFullBoardPlacementKind;
     }
     throw std::logic_error("RZone certificate has an invalid kind");
 }
@@ -276,6 +281,7 @@ RZoneStepKind decodeKind(std::uint8_t kind)
     if (kind == kTerminalKind) return RZoneStepKind::Terminal;
     if (kind == kFixedSlideKind) return RZoneStepKind::FixedSlide;
     if (kind == kUniversalPlacementKind) return RZoneStepKind::UniversalPlacement;
+    if (kind == kFullBoardPlacementKind) return RZoneStepKind::FullBoardPlacement;
     throw std::invalid_argument("kind is invalid");
 }
 
@@ -445,8 +451,9 @@ void validateFixedSlide(const RZoneCertificate& parent,
 
 std::vector<RZoneCertificate> validateRecords(
     const std::vector<DiskRecord>& records,
-    unsigned winning_tile)
+    unsigned winning_tile, unsigned semantics_version)
 {
+    FullBoardProofIndex full_board_proofs;
     std::vector<RZoneCertificate> certificates;
     certificates.reserve(records.size());
     std::unordered_set<RecordIdentity, RecordIdentityHash> identities;
@@ -477,6 +484,7 @@ std::vector<RZoneCertificate> validateRecords(
                 record.kind,
                 record.phase,
                 record.argument,
+                record.depth,
             };
             if (!identities.insert(identity).second) {
                 throw std::invalid_argument("duplicate certificate record");
@@ -508,6 +516,11 @@ std::vector<RZoneCertificate> validateRecords(
                 if (cellRank(record.masked_board, record.argument) < winning_rank) {
                     throw std::invalid_argument("Terminal tile does not reach winning_tile");
                 }
+            } else if (certificate.kind == RZoneStepKind::FullBoardPlacement) {
+                if (semantics_version < 2 || record.argument != kNoArgument) {
+                    throw std::invalid_argument("FullBoardPlacement semantics or argument is invalid");
+                }
+                full_board_proofs.validate(certificate);
             } else {
                 if (record.child_id == kNoRZoneCertificate || record.child_id >= id) {
                     throw std::invalid_argument(
@@ -549,6 +562,7 @@ std::vector<RZoneCertificate> validateRecords(
                 }
             }
             certificates.push_back(certificate);
+            full_board_proofs.insert(certificate);
         } catch (const std::exception& error) {
             throw std::invalid_argument(
                 "certificate " + std::to_string(id) + ": " + error.what());
@@ -608,7 +622,8 @@ RzFileSummary RzFile::load(const std::filesystem::path& path, RZoneTable& table)
     if (get32(header.data() + 24) != kBoardEncodingVersion) {
         fail(path, "incompatible board encoding version");
     }
-    if (get32(header.data() + 28) != kSemanticsVersion) {
+    if (get32(header.data() + 28) != 1 &&
+        get32(header.data() + 28) != kSemanticsVersion) {
         fail(path, "incompatible RZone semantics version");
     }
     const unsigned winning_tile = get32(header.data() + 32);
@@ -655,7 +670,7 @@ RzFileSummary RzFile::load(const std::filesystem::path& path, RZoneTable& table)
 
     std::vector<RZoneCertificate> certificates;
     try {
-        certificates = validateRecords(records, winning_tile);
+        certificates = validateRecords(records, winning_tile, get32(header.data() + 28));
     } catch (const std::exception& error) {
         fail(path, error.what());
     }

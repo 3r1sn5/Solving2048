@@ -19,7 +19,7 @@ public:
     static constexpr std::uint16_t kFormatVersion = 1;
     static constexpr std::uint16_t kHeaderSize = 128;
     static constexpr std::uint16_t kRecordSize = 32;
-    static constexpr std::uint32_t kSemanticsVersion = 1;
+    static constexpr std::uint32_t kSemanticsVersion = 2;
 
     static RzFileSummary load(const std::filesystem::path& path, RZoneTable& table);
     static RzFileSummary summarize(

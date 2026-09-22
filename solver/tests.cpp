@@ -842,28 +842,9 @@ std::string validConfigText()
 
 void testSolverConfigParsingAndValidation()
 {
-    const SolverConfig defaults = solver2048::loadSolverConfig("solver/solver.cfg");
-    check(defaults.winning_tile >= 2 &&
-              (defaults.winning_tile & (defaults.winning_tile - 1)) == 0 &&
-              defaults.node_limit == 0 && defaults.progress_interval == 100000,
-          "default solver.cfg search settings mismatch");
-    check(defaults.use_transposition_table && defaults.use_tt_symmetry,
-          "default solver.cfg must enable exact TT and symmetry canonicalization");
-    check(!defaults.tt_path.empty(),
-          "default solver.cfg must provide a persistent TT path");
-    check(defaults.rzone_mode == solver2048::RZoneMode::Lookup &&
-              defaults.rzone_lookup_policy == RZoneLookupPolicy::SmallestFirst &&
-              defaults.use_rzone_symmetry &&
-              defaults.rzone_max_cells == 16 &&
-              !defaults.rzone_shadow_exact_check && !defaults.rzone_active_pruning &&
-              defaults.load_rz &&
-              defaults.save_rz && !defaults.rz_path.empty(),
-          "default solver.cfg RZone settings mismatch");
-    check(solver2048::formatOpening(defaults.opening) == "2@0,2@1",
-          "default solver.cfg opening mismatch");
-    check(defaults.network == "4x6patt" && defaults.model_path == "models/4x6patt.w" &&
-              !defaults.sgf_path.empty(),
-          "default solver.cfg network/output settings mismatch");
+    // The workspace configuration is an editable experiment configuration.
+    // Check that it parses; assert exact values using the isolated fixture below.
+    (void)solver2048::loadSolverConfig("solver/solver.cfg");
 
     TemporaryConfigFile valid(validConfigText());
     const SolverConfig parsed = solver2048::loadSolverConfig(valid.path);
@@ -1491,6 +1472,14 @@ void testPersistentRzRoundTripAndMaxCellIndexing()
     check(universal.has_value(), "persistent RZone UniversalPlacement fixture is missing");
     check(source.size() == 3, "persistent RZone fixture must contain a three-record DAG");
 
+    TemporaryRzFile legacy_snapshot;
+    RzFile::save(legacy_snapshot.path, source);
+    writeByte(legacy_snapshot.path, 28, 1);
+    RZoneTable legacy_loaded(game, 16);
+    check(RzFile::load(legacy_snapshot.path, legacy_loaded).record_count == 3 &&
+              RzProofTable::load(legacy_snapshot.path).summary().record_count == 3,
+          "both readers must continue accepting semantics-v1 snapshots");
+
     TemporaryRzFile snapshot;
     const RzFileSummary saved = RzFile::save(snapshot.path, source);
     const RzFileSummary summarized = RzFile::summarize(source);
@@ -1564,6 +1553,115 @@ void testPersistentRzRoundTripAndMaxCellIndexing()
               limited_terminal && limited_terminal->id == *terminal &&
               limited_terminal->transform == 0,
           "max_cells must limit only the rebuilt lookup index");
+}
+
+void testFullBoardPlacementFallback()
+{
+    MechanicsGame game;
+    // Either row can win, but a spawn in its gap changes the required proof.
+    const Board parent = tiles({{0, 8}, {2, 8}, {4, 8}, {6, 8}});
+    RZoneTable table(game, 16);
+    std::vector<RZoneMatch> witnesses;
+    const auto placements = game.legalPlacements(parent);
+    for (const auto& placement : placements) {
+        const auto slides = game.legalSlides(placement.board);
+        const auto left = std::find_if(slides.begin(), slides.end(), [](const auto& slide) {
+            return slide.direction == Direction::Left;
+        });
+        check(left != slides.end(), "fallback fixture must have a Left slide");
+        const auto terminal = table.createTerminal(left->afterstate, Phase::Environment);
+        check(terminal.has_value(), "every fallback branch must immediately win");
+        const auto child = table.liftFixedSlide(placement.board, Direction::Left, *terminal);
+        check(child.has_value(), "fallback child must have a valid proof");
+        check(!table.liftUniversalPlacement(parent, *child),
+              "fixture must require different proofs for different placements");
+        witnesses.push_back({*child, 0});
+    }
+    const auto fallback = table.liftFullBoardPlacement(parent, witnesses);
+    check(fallback.has_value(), "complete branch proofs must produce a full-board fallback");
+    const auto* entry = table.find(*fallback);
+    check(entry->kind == RZoneStepKind::FullBoardPlacement && entry->mask == 0xffff &&
+              entry->masked_board == parent.raw && entry->depth == 3,
+          "fallback must preserve the exact board, including empty cells");
+    check(table.lookup(parent, Phase::Environment).has_value() &&
+              !table.lookup(placements.front().board, Phase::Environment),
+          "full-board fallback must not match a changed empty cell");
+    auto missing = witnesses;
+    missing.pop_back();
+    check(!table.liftFullBoardPlacement(parent, missing), "missing placement must be rejected");
+    auto invalid = witnesses;
+    invalid.front().id = *fallback;
+    check(!table.liftFullBoardPlacement(parent, invalid), "wrong child phase must be rejected");
+    invalid = witnesses;
+    invalid.front().transform = 8;
+    check(!table.liftFullBoardPlacement(parent, invalid), "invalid transform must be rejected");
+
+    TemporaryRzFile snapshot;
+    RzFile::save(snapshot.path, table);
+    RZoneTable loaded(game, 16);
+    RzFile::load(snapshot.path, loaded);
+    const auto proof = RzProofTable::load(snapshot.path);
+    check(loaded.lookup(parent, Phase::Environment).has_value() &&
+              proof.find(*fallback)->kind == RZoneStepKind::FullBoardPlacement,
+          "both readers must validate and retain full-board proofs");
+    RZoneTable symmetric(game, 16, 16, RZoneLookupPolicy::SmallestFirst, true);
+    RzFile::load(snapshot.path, symmetric);
+    for (std::uint8_t transform = 0; transform < 8; ++transform) {
+        const auto rotated = solver2048::transformBoard(parent, transform);
+        const auto match = symmetric.lookup(rotated, Phase::Environment);
+        check(match && match->id == *fallback &&
+                  RzProofTable::matches(*proof.find(*fallback), rotated,
+                                        Phase::Environment, match->transform),
+              "full-board fallback must retain sound D4 lookup and orientation mapping");
+    }
+    RZoneTable limited(game, 16, 15);
+    RzFile::load(snapshot.path, limited);
+    check(!limited.lookup(parent, Phase::Environment) &&
+              !limited.liftFullBoardPlacement(parent, witnesses),
+          "fallback must respect rzone_max_cells");
+
+    const auto offset = RzFile::kHeaderSize + (*fallback - 1) * RzFile::kRecordSize;
+    auto reject = [&](const char* message) {
+        refreshRzChecksum(snapshot.path);
+        RZoneTable rejected(game, 16);
+        checkThrows([&] { RzFile::load(snapshot.path, rejected); }, message);
+        checkThrows([&] { RzProofTable::load(snapshot.path); }, message);
+        check(rejected.size() == 0, "invalid proof must not be partially published");
+    };
+    writeByte(snapshot.path, offset + 8, 1); // Only an Environment terminal is in this prefix.
+    reject("fallback with uncovered placements must be rejected");
+    RzFile::save(snapshot.path, table);
+    writeByte(snapshot.path, offset + 16, 0xfe);
+    reject("fallback must not accept a partial-board mask");
+    RzFile::save(snapshot.path, table);
+    writeByte(snapshot.path, offset + 12, 2);
+    reject("fallback must not accept insufficient proof depth");
+    RzFile::save(snapshot.path, table);
+    writeByte(snapshot.path, offset + 8, static_cast<std::uint8_t>(*fallback));
+    reject("fallback must not refer to itself or later certificates");
+    RzFile::save(snapshot.path, table);
+    writeByte(snapshot.path, 28, 1);
+    reject("old semantics must not silently accept the new certificate kind");
+
+    // A full-board Environment certificate can be lifted through a Player slide.
+    RZoneTable lift_table(game, 16);
+    const Board compact = tiles({{0, 8}, {1, 8}});
+    std::vector<RZoneMatch> compact_witnesses;
+    for (const auto& placement : game.legalPlacements(compact)) {
+        const auto slides = game.legalSlides(placement.board);
+        const auto left = std::find_if(slides.begin(), slides.end(), [](const auto& slide) {
+            return slide.direction == Direction::Left;
+        });
+        const auto terminal = lift_table.createTerminal(left->afterstate, Phase::Environment);
+        const auto child = lift_table.liftFixedSlide(placement.board, Direction::Left, *terminal);
+        compact_witnesses.push_back({*child, 0});
+    }
+    const auto full = lift_table.liftFullBoardPlacement(compact, compact_witnesses);
+    const auto upper = lift_table.liftFixedSlide(
+        tiles({{12, 8}, {13, 8}}), Direction::Up, *full);
+    check(upper.has_value(), "full-board fallback must allow upward Player propagation");
+    RzFile::save(snapshot.path, lift_table);
+    (void)RzProofTable::load(snapshot.path);
 }
 
 void testPersistentRzRejectsIncompatibleAndCorruptFiles()
@@ -2692,7 +2790,7 @@ void testSgfActionEncodingEscapingAndOrder()
               sgf.find("persistent_rz_save = enabled") != std::string::npos &&
               sgf.find("rz_file = solver/rz/test.rz") != std::string::npos &&
               sgf.find("rz_format_version = 1") != std::string::npos &&
-              sgf.find("rz_semantics_version = 1") != std::string::npos &&
+              sgf.find("rz_semantics_version = " + std::to_string(RzFile::kSemanticsVersion)) != std::string::npos &&
               sgf.find("rz_prefix_record_count = 7") != std::string::npos &&
               sgf.find("rz_prefix_checksum = 0x123456789abcdef0") != std::string::npos &&
               sgf.find("rzone_certificate_id = 7") != std::string::npos &&
@@ -2765,6 +2863,7 @@ int main()
          testActionValueOrderingAndDirectionTieBreak},
         {"solver.cfg parsing and validation", testSolverConfigParsingAndValidation},
         {"RZone certificate lifts and replay-free lookup", testRZoneCertificateLiftsAndLookup},
+        {"full-board placement fallback and independent validation", testFullBoardPlacementFallback},
         {"RZone active pruning covers Environment siblings",
          testRZoneActivePruningCoversEnvironmentSiblings},
         {"D4 canonicalization and action transforms", testD4CanonicalizationAndActionTransforms},

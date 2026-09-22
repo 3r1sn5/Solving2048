@@ -570,7 +570,8 @@ bool verifyRzArtifactBinding(const ProofManifest& manifest,
         throw std::runtime_error("SGF winning tile does not match RZone file");
     }
     if (*manifest.rz_format_version != RzFile::kFormatVersion ||
-        *manifest.rz_semantics_version != RzFile::kSemanticsVersion) {
+        (*manifest.rz_semantics_version != 1 &&
+         *manifest.rz_semantics_version != RzFile::kSemanticsVersion)) {
         throw std::runtime_error("SGF RZone format or semantics version is incompatible");
     }
     if (*manifest.rz_prefix_record_count > rzone_table->summary().record_count) {
@@ -1151,7 +1152,8 @@ private:
                 *entry.slide,
                 inverseTransform(record.rzone_transform.value_or(0)));
             expected_action = action;
-        } else if (entry.kind != RZoneStepKind::UniversalPlacement) {
+        } else if (entry.kind != RZoneStepKind::UniversalPlacement &&
+                   entry.kind != RZoneStepKind::FullBoardPlacement) {
             fail(board, record.phase,
                  "Environment RZone leaf does not reference a UniversalPlacement certificate");
         }
@@ -1240,9 +1242,21 @@ private:
             }
         } else if (record.solved_by == SolvedBy::Backpropagation &&
                    record.phase == Phase::Environment) {
-            if (entry->kind != RZoneStepKind::UniversalPlacement) {
+            if (entry->kind != RZoneStepKind::UniversalPlacement &&
+                entry->kind != RZoneStepKind::FullBoardPlacement) {
                 fail(board, record.phase,
                      "Environment SGF source references a non-UniversalPlacement certificate");
+            }
+            if (entry->kind == RZoneStepKind::FullBoardPlacement) {
+                for (const auto& child : children) {
+                    const auto* witness = child.rzone_certificate_id
+                        ? rzone_table_->find(*child.rzone_certificate_id) : nullptr;
+                    if (child.outcome != Outcome::Win || !witness ||
+                        witness->id > entry->child || witness->depth >= entry->depth) {
+                        fail(board, record.phase,
+                             "FullBoardPlacement source has an invalid child witness");
+                    }
+                }
             }
             const bool has_source_child = std::any_of(
                 children.begin(), children.end(), [&](const TraceChildSummary& child) {
@@ -1250,7 +1264,7 @@ private:
                                std::optional<RZoneCertificateId>(entry->child) &&
                            child.rzone_transform == record.rzone_transform;
                 });
-            if (!has_source_child) {
+            if (entry->kind == RZoneStepKind::UniversalPlacement && !has_source_child) {
                 fail(board, record.phase,
                      "Environment RZone source does not contain its certificate child");
             }

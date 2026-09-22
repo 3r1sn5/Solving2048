@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Solving2048 RZone Explorer</title>
+  <link rel="stylesheet" href="viewer.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <div class="brand-name">RZone Proof Explorer</div>
+      <div class="brand-context" id="file-status">Solving2048 · 尚未載入資料</div>
+    </div>
+    <div class="toolbar">
+      <label class="file-button" for="json-file">Open JSON</label>
+      <input id="json-file" type="file" accept=".json,application/json">
+      <button id="demo" type="button">Use demo</button>
+      <div class="segment" id="browser-mode" aria-label="Browser mode">
+        <button class="active" type="button" data-mode="certificates">Certificates</button>
+        <button type="button" data-mode="reused">Top reused</button>
+      </div>
+      <div class="nav-buttons">
+        <button id="previous-certificate" type="button" title="Previous certificate">‹</button>
+        <button id="next-certificate" type="button" title="Next certificate">›</button>
+      </div>
+    </div>
+  </header>
+
+  <section id="drop-zone" class="drop-zone">Drop <code>rz_viewer_export</code> JSON here</section>
+  <section id="summary" class="summary-band" aria-label="RZone summary"></section>
+
+  <main class="workspace">
+    <aside class="panel explorer-panel">
+      <div class="panel-heading">
+        <div><div class="panel-title" id="explorer-title">Certificates</div><div id="filter-summary" class="panel-meta">0 records</div></div>
+        <button id="clear-filters" type="button" class="small-button">Reset</button>
+      </div>
+      <div class="filters">
+        <label class="wide">Search ID / mask / board<input id="search" type="search" placeholder="123, 0x00ff…"></label>
+        <label>Kind<select id="kind-filter"><option value="">All</option><option value="terminal">Terminal</option><option value="fixed_slide">Fixed slide</option><option value="universal_placement">Universal placement</option></select></label>
+        <label>Phase<select id="phase-filter"><option value="">All</option><option value="player">Player</option><option value="environment">Environment</option></select></label>
+        <label>Cells<select id="cells-filter"><option value="">All</option></select></label>
+        <label>Sort<select id="sort-filter"><option value="id">ID ↑</option><option value="hits">Hits ↓</option><option value="cells">Cells ↑</option><option value="depth">Depth ↓</option></select></label>
+        <label class="checkbox wide"><input id="referenced-filter" type="checkbox"> Sampled SGF occurrence only</label>
+        <details class="distribution-details" open>
+          <summary>RZone cell distribution</summary>
+          <div class="distribution-copy"><span><i class="pattern-key"></i>Certificates</span><span><i class="hit-key"></i>Exact hit count</span></div>
+          <div id="cell-distribution" class="distribution"></div>
+        </details>
+      </div>
+      <div id="certificate-list" class="certificate-list"><div class="empty-note">Load a viewer JSON to begin.</div></div>
+      <div class="pager"><button id="prev-page" type="button">‹</button><span id="page-label">0 / 0</span><button id="next-page" type="button">›</button></div>
+    </aside>
+
+    <section class="panel board-panel">
+      <div class="panel-heading">
+        <div><div id="selected-label" class="panel-title">RZone pattern</div><div id="board-context" class="panel-meta">Select a certificate</div></div>
+        <span id="kind-badge" class="pill">—</span>
+      </div>
+      <div class="board-stage">
+        <section class="board-card">
+          <div class="board-label"><strong>Certificate pattern</strong><span>RZone 外為 don't-care；斜線格要求 empty。</span></div>
+          <div id="pattern-board" class="board" aria-label="RZone masked board"></div>
+        </section>
+        <section class="board-card">
+          <div class="board-label"><strong>Candidate occurrence</strong><span id="occurrence-label">Select a sampled SGF occurrence.</span></div>
+          <div id="candidate-board" class="board" aria-label="SGF candidate board"></div>
+        </section>
+      </div>
+      <div class="board-legend"><span><i class="zone"></i>RZone dependency</span><span><i class="outside"></i>Don't care</span><span><i class="required"></i>Required empty</span></div>
+    </section>
+
+    <aside class="panel inspector-panel">
+      <div class="panel-heading"><div class="panel-title">Inspector</div><div class="panel-meta">Schema v1</div></div>
+      <div class="inspector-content">
+        <section class="inspect-section"><h2>RZone certificate</h2><dl id="certificate-details" class="facts"></dl></section>
+        <section class="inspect-section"><div class="section-heading"><h2>Proof chain</h2><span id="chain-summary">0 steps</span></div><div id="proof-chain" class="proof-chain"><div class="empty-note">No certificate selected.</div></div></section>
+        <section class="inspect-section">
+          <div class="section-heading"><h2>Sampled search occurrences</h2><span id="occurrence-summary">0 occurrences</span></div>
+          <div id="occurrence-list" class="occurrence-list"><div class="empty-note">No SGF data.</div></div>
+          <dl id="occurrence-details" class="facts occurrence-facts"></dl>
+        </section>
+        <section class="inspect-section"><h2>Per-opening search statistics</h2><div id="run-statistics" class="run-statistics"></div></section>
+      </div>
+    </aside>
+  </main>
+
+  <template id="summary-card-template"><article class="summary-item"><span class="summary-label"></span><strong class="summary-value"></strong><small></small></article></template>
+  <script src="viewer.js"></script>
+</body>
+</html>

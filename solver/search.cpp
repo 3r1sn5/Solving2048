@@ -654,6 +654,18 @@ Outcome Solver::solveEnvironment(Board afterstate, TraceNode& trace)
         } else {
             liftEnvironmentRZone(afterstate, trace);
         }
+        if (options_.rzone_mode != RZoneMode::Disabled && !trace.rzone_certificate_id) {
+            std::vector<RZoneMatch> witnesses;
+            for (const auto& child : trace.children) {
+                if (!child->rzone_certificate_id) break;
+                witnesses.push_back({*child->rzone_certificate_id,
+                                     child->rzone_transform.value_or(0)});
+            }
+            if (witnesses.size() == placements.size()) {
+                const auto id = rzone_table_.liftFullBoardPlacement(afterstate, witnesses);
+                if (id) annotateRZone(trace, *id, false);
+            }
+        }
     }
     storeEnvironmentTransposition(afterstate, trace);
     return trace.outcome;

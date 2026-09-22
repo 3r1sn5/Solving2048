@@ -206,6 +206,56 @@ proof checker behavior are unchanged. The optimization requires
 `rzone_mode=lookup`; use `--no-rzone-active-pruning` for the passive-lookup
 baseline.
 
+Placement diagnostics are printed in the final solver summary and saved in the
+SGF root metadata (with a `rzone_` prefix):
+
+- `placement_lift_blocked` is split into mutually exclusive first-failure
+  reasons: `placement_lift_blocked_invalid_child`, `_mask_empty`,
+  `_parent_mismatch`, `_no_placements`, `_placement_mismatch`, and `_publish`.
+  These suffixes all follow `placement_lift_blocked`. Their sum equals the
+  blocked total; successes plus blocked equals attempts. `_mask_empty` means
+  the child mask includes any cell empty in the parent, including a newly
+  placed tile's cell or a required empty cell. This check precedes parent
+  pattern comparison and placement enumeration. Counts are lift attempts,
+  not distinct certificates or Environment nodes.
+- `environment_all_win_nodes` counts expanded Environment nodes whose children
+  all resolve to Win, including siblings resolved by active pruning.
+  `environment_all_win_without_rzone` counts the subset still lacking a parent
+  RZone certificate after lifting. Divide the latter by the former to measure
+  the fraction of completed AND proofs that cannot propagate an RZone. This
+  includes cases with missing child certificates (for example, exact TT hits).
+  Terminal/cache-hit Environment nodes, Loss/Unknown nodes, and runs with
+  RZone disabled are excluded. Both generation and lookup modes count these
+  nodes. Statistics describe the current solve, even when caches are loaded.
+- Missing-parent proofs are further partitioned into
+  `environment_no_rzone_all_children_rzone`,
+  `environment_no_rzone_some_children_rzone`, and
+  `environment_no_rzone_no_children_rzone`. Their sum equals
+  `environment_all_win_without_rzone`. These count directly attached child
+  certificates, including active-pruned leaves; they do not recover certificates
+  through TT source references or perform extra RZone lookups.
+  `environment_no_rzone_multiple_child_rzones` is a subset of the all-children
+  category with more than one `(certificate ID, transform)` pair. Different
+  identities do not necessarily mean different masks or logically distinct proofs.
+  Divide the all-children category by missing-parent nodes for its share of the
+  bottleneck, or by all-Win Environment nodes for its share of all completed AND
+  proofs. These are candidates for proof composition, not guaranteed new reusable
+  certificates: composition still needs a sound parent pattern and full placement
+  coverage over every completion of that pattern.
+
+Existing complete SGFs containing the original Environment diagnostic totals can
+be recounted without solving again:
+
+```bash
+g++ -std=c++17 -O2 solver/tools/sgf_rzone_diagnostics.cpp -o /tmp/sgf_rzone_diagnostics
+/tmp/sgf_rzone_diagnostics path/to/solve.sgf > child_rzone_coverage.json
+```
+
+The utility streams the tree in depth-sized memory, includes active-pruned leaves,
+and rejects a recount that disagrees with the original all-Win/missing-parent
+totals. It accepts the complete tree layout emitted by `SgfWriter`; it does not
+replay moves or independently verify the proof.
+
 This first version stores only Player-view Win proofs. Exact TT remains the
 fallback for Loss results and Win states whose RZone derivation stops. RZone
 certificates can be loaded, extended, and atomically saved as a `.rz` snapshot.
@@ -384,6 +434,74 @@ and reports progress, but a very large SVG can still require several GB of
 memory. The viewer asks for confirmation above 50,000 visible nodes; hiding
 `Skipped` stubs substantially reduces the graph when only the actual DFS trace
 matters.
+
+### RZone viewer
+
+The RZone viewer uses the validated C++ `.rz` reader and a disposable JSON
+export rather than duplicating the persistent binary parser in JavaScript.
+Build the exporter and create a table-only view with:
+
+```bash
+make rz-viewer-export
+solver/rz_viewer_export \
+  --rz result/APTest/32_RZ_Pruning.rz \
+  --output result/APTest/32_RZ_Pruning.viewer.json
+```
+
+Add `--sgf PATH` (repeatable) to associate certificates with their search
+nodes, candidate boards, outcomes, transforms, and per-run RZone statistics.
+For a multi-opening batch, use the generated sequence directly:
+
+```bash
+solver/rz_viewer_export \
+  --sequence result/32_multi/proof_sequence.txt \
+  --output result/32_multi/rzone_viewer.json
+```
+
+Open `solver/rz_viewer/index.html` and load or drop the JSON. The viewer shows
+the complete-table kind/phase/cell distributions, an exact certificate reuse
+ranking, filterable certificate records, 4x4 RZone overlays, recursive proof
+chains, and SGF occurrences. With SGFs, referenced certificates, the 1,000
+most-used certificates, and their child closure are exported by default so a
+large `.rz` does not automatically expand into a much larger JSON file;
+table-wide statistics still cover every record. Change the reuse ranking bound
+with `--top-hits N`, or pass `--all-certificates` when the full table browser is
+required.
+For very large SGFs, `--hits-only` keeps only `solved_by=RZONE_TT`
+occurrences and their proof chains while preserving the full-table statistics.
+Occurrence details are deterministically reservoir-sampled to 50,000 records
+by default. The exporter still scans the complete SGF and stores exact global
+and per-certificate `solved_by=RZONE_TT` hit counts, so sampling does not affect
+the **Top reused** ranking. Ordinary lookup hits and active-pruning hits share
+that SGF marker and are therefore combined. Use `--max-occurrences N` to
+change the browser payload limit, or `0` to explicitly request an unbounded
+export.
+
+### Scalable indexed search-tree viewer
+
+`solver/tree_viewer` keeps the complete SGF search tree logically expanded but
+loads and paints only the current DFS-order/depth viewport. It avoids loading a
+multi-GB SGF into JavaScript or creating one SVG element per node. Build an
+atomic fixed-record index and start its local backend with:
+
+```bash
+make tree-viewer-index
+solver/tree_viewer_index \
+  --sgf result/APTest/32_RZ_Pruning.sgf \
+  --rz result/APTest/32_RZ_Pruning.rz \
+  --tt result/APTest/32_RZ_Pruning.tt \
+  --output result/APTest/32_RZ_Pruning.tree-index
+python3 solver/tree_viewer/server.py serve \
+  --index result/APTest/32_RZ_Pruning.tree-index \
+  --port 8080
+```
+
+Open `http://127.0.0.1:8080/`. The Canvas view starts with the complete DFS
+trajectory, switches between aggregate/sampled and exact nodes as it zooms,
+and requires no branch-expansion clicks. Selecting a node retrieves its board,
+RZone overlay and proof chain, root path, and same-SGF TT source. See
+`solver/tree_viewer/README.md` for the index format, performance measurements,
+and current persistent-TT/composite-RZone limitations.
 
 ## Tests
 

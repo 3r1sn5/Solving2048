@@ -22,6 +22,11 @@ struct ProofEntry {
 class ProofTable {
 public:
     static ProofTable load(const std::filesystem::path& path);
+    static ProofTable empty(unsigned winning_tile) {
+        ProofTable table;
+        table.winning_tile_ = winning_tile;
+        return table;
+    }
 
     unsigned winningTile() const { return winning_tile_; }
     bool usesSymmetry() const { return symmetry_; }

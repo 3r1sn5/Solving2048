@@ -107,6 +107,8 @@ std::string nodeComment(const TraceNode& node, const SgfMetadata* metadata)
                 << metadata->statistics.rzone.slide_lift_attempts
                 << '\n' << "rzone_slide_lift_successes = "
                 << metadata->statistics.rzone.slide_lift_successes
+                << '\n' << "rzone_full_board_placement_certificates = "
+                << metadata->statistics.rzone.full_board_placement_certificates
                 << '\n' << "rzone_placement_lift_attempts = "
                 << metadata->statistics.rzone.placement_lift_attempts
                 << '\n' << "rzone_placement_lift_successes = "
