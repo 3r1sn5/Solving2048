@@ -21,6 +21,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <tuple>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -161,7 +162,8 @@ public:
 
 class MechanicsGame final : public Game {
 public:
-    Board fixedOpening() const override { return {}; }
+    explicit MechanicsGame(Board opening = {}) : opening_(opening) {}
+    Board fixedOpening() const override { return opening_; }
     bool hasWinningTile(Board value, unsigned winning_tile) const override
     {
         ++winning_calls;
@@ -201,6 +203,9 @@ public:
     mutable std::uint64_t slide_calls = 0;
     mutable std::uint64_t placement_calls = 0;
     mutable std::uint64_t tile_value_calls = 0;
+
+private:
+    Board opening_;
 };
 
 Board tiles(std::initializer_list<std::pair<int, unsigned>> values)
@@ -1575,6 +1580,137 @@ void testPersistentRzRoundTripAndMaxCellIndexing()
               limited_terminal && limited_terminal->id == *terminal &&
               limited_terminal->transform == 0,
           "max_cells must limit only the rebuilt lookup index");
+}
+
+void testRZonePhaseIndexesAndRelocation()
+{
+    MechanicsGame game;
+    for (const auto policy : {RZoneLookupPolicy::FullScan, RZoneLookupPolicy::SmallestFirst}) {
+        for (const bool symmetry : {false, true}) {
+            RZoneTable source(game, 16, 16, policy, symmetry, false);
+            const Board terminal = tiles({{0, 16}});
+            const auto environment = source.createTerminal(terminal, Phase::Environment);
+            check(environment.has_value(), "phase-index terminal fixture missing");
+            check(!source.lookup(terminal, Phase::Player) &&
+                      source.statistics().lookup_masks_tested == 0,
+                  "lookup must not scan masks that only exist in the other phase");
+            const auto player = source.createTerminal(terminal, Phase::Player);
+            const auto hit = source.lookup(terminal, Phase::Player);
+            const unsigned transforms = symmetry ? 8 : 1;
+            check(player && hit && hit->id == *player && hit->transform == 0 &&
+                      source.statistics().masks_indexed == 1 &&
+                      source.statistics().lookup_masks_tested == transforms &&
+                      source.statistics().lookup_candidates == (symmetry ? 2 : 1),
+                  "shared masks must count once and exclude opposite-phase candidates");
+
+            std::vector<Board> queries = {Board{}, terminal, tiles({{0, 32}})};
+            // Grow the owning mask map and inner buckets after caching their
+            // addresses. Include constrained empty cells and shared phase masks.
+            for (int position = 0; position < 16; ++position) {
+                for (const auto phase : {Phase::Player, Phase::Environment}) {
+                    source.createTerminal(tiles({{position, 16}}), phase);
+                    source.createTerminal(tiles({{position, 32}}), phase);
+                }
+            }
+            for (const auto direction : {Direction::Left, Direction::Up}) {
+                for (int line = 0; line < 4; ++line) {
+                    const auto position = [&](int offset) {
+                        return direction == Direction::Left ? line * 4 + offset : offset * 4 + line;
+                    };
+                    const auto child = source.createTerminal(
+                        tiles({{position(0), 16}}), Phase::Environment);
+                    for (int first = 0; first < 4; ++first) {
+                        for (int second = first + 1; second < 4; ++second) {
+                            const Board parent = tiles({{position(first), 8}, {position(second), 8}});
+                            const auto fixed = source.liftFixedSlide(parent, direction, *child);
+                            check(fixed.has_value(), "index growth fixture must produce a slide proof");
+                            source.liftUniversalPlacement(parent, *fixed);
+                            for (std::uint8_t transform = 0; transform < 8; ++transform) {
+                                queries.push_back(solver2048::transformBoard(parent, transform));
+                            }
+                            queries.push_back(Board{parent.raw | (std::uint64_t{1} << (position(0) * 4))});
+                        }
+                    }
+                }
+            }
+            check(source.statistics().masks_indexed > 32,
+                  "growth fixture must exercise many distinct masks");
+
+            // Independent oracle scans immutable certificates, with no use of
+            // either lookup index, and checks the complete deterministic rank.
+            auto compareWithOracle = [&](RZoneTable& table, unsigned max_cells) {
+                for (const Board query : queries) {
+                    for (const auto phase : {Phase::Player, Phase::Environment}) {
+                        std::optional<std::tuple<unsigned, unsigned, RZoneCertificateId, std::uint8_t>> best;
+                        for (RZoneCertificateId id = 1; id <= source.size(); ++id) {
+                            const auto& certificate = *source.find(id);
+                            const unsigned cells = RZoneTable::countCells(certificate.mask);
+                            if (certificate.phase != phase || cells > max_cells) continue;
+                            for (std::uint8_t transform = 0; transform < transforms; ++transform) {
+                                const Board candidate = solver2048::transformBoard(query, transform);
+                                if (RZoneTable::maskedBoard(candidate, certificate.mask) != certificate.masked_board) continue;
+                                const auto rank = std::make_tuple(cells, certificate.depth, id, transform);
+                                if (!best || rank < *best) best = rank;
+                            }
+                        }
+                        const auto actual = table.lookup(query, phase);
+                        check(actual.has_value() == best.has_value() &&
+                                  (!best || (actual->id == std::get<2>(*best) &&
+                                             actual->transform == std::get<3>(*best))),
+                              "indexed lookup must match the certificate-scan oracle");
+                    }
+                }
+            };
+            compareWithOracle(source, 16);
+
+            TemporaryRzFile snapshot;
+            const auto saved = RzFile::save(snapshot.path, source);
+            auto moved = [&] {
+                RZoneTable loaded(game, 16, 16, policy, symmetry, false);
+                RzFile::load(snapshot.path, loaded);
+                return RZoneTable(std::move(loaded));
+            }(); // Destroy the moved-from owner before using the borrowed buckets.
+            compareWithOracle(moved, 16);
+            check(RzFile::summarize(moved).payload_checksum == saved.payload_checksum,
+                  "index rebuilding and moving must preserve certificate IDs and payload");
+            checkThrows([&] { RzFile::load(snapshot.path, moved); },
+                        "loading into a populated table must still be rejected");
+            compareWithOracle(moved, 16);
+
+            RZoneTable limited(game, 16, 2, policy, symmetry, false);
+            RzFile::load(snapshot.path, limited);
+            compareWithOracle(limited, 2);
+        }
+    }
+}
+
+void testRZoneIndexCrossOpeningHandoff()
+{
+    const Board opening = tiles({{0, 8}, {1, 8}});
+    MechanicsGame next_game(solver2048::transformBoard(opening, 1));
+    SolverOptions options{16, 0, 0, true, true};
+    options.rzone_mode = RZoneMode::Lookup;
+    options.rzone_lookup_policy = RZoneLookupPolicy::SmallestFirst;
+    options.use_rzone_symmetry = true;
+    Solver next(next_game, options);
+    RzFileSummary expected;
+    std::uint64_t masks = 0;
+    {
+        MechanicsGame first_game(opening);
+        Solver first(first_game, options);
+        const auto result = first.solve();
+        check(result.outcome == Outcome::Win, "handoff fixture must prove the first opening");
+        masks = result.statistics.rzone.masks_indexed;
+        expected = RzFile::summarize(first);
+        next.adoptPersistentProofs(first);
+    }
+    const auto result = next.solve();
+    check(result.outcome == Outcome::Win && result.statistics.combinedNodes() == 1 &&
+              result.root->solved_by == SolvedBy::RZoneTable &&
+              result.statistics.rzone.loaded_certificates == expected.record_count &&
+              result.statistics.rzone.masks_indexed == masks &&
+              RzFile::summarize(next).payload_checksum == expected.payload_checksum,
+          "phase bucket references must survive handoff and destruction of the prior Solver");
 }
 
 void testFullBoardPlacementFallback()
@@ -3079,6 +3215,8 @@ int main()
         {"combined node-limit Unknown semantics", testNodeLimitReturnsUnknownForEveryAttemptedChild},
         {"persistent RZone round trip and max-cell indexing",
          testPersistentRzRoundTripAndMaxCellIndexing},
+        {"RZone phase indexes, growth, reload, and move", testRZonePhaseIndexesAndRelocation},
+        {"RZone index cross-opening handoff", testRZoneIndexCrossOpeningHandoff},
         {"persistent RZone compatibility and corruption rejection",
          testPersistentRzRejectsIncompatibleAndCorruptFiles},
         {"proof sequence manifest round trip", testProofSequenceManifestRoundTrip},

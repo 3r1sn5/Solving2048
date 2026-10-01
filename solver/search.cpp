@@ -113,15 +113,15 @@ void Solver::adoptPersistentProofs(Solver& completed)
 
     rzone_table_.certificates_ =
         std::move(completed.rzone_table_.certificates_);
+    // Moving the owning map with its default allocator preserves addresses of
+    // its phase buckets, including those borrowed by the ordered mask index.
     rzone_table_.patterns_ = std::move(completed.rzone_table_.patterns_);
-    rzone_table_.masks_by_cell_count_ =
-        std::move(completed.rzone_table_.masks_by_cell_count_);
+    rzone_table_.masks_by_phase_ =
+        std::move(completed.rzone_table_.masks_by_phase_);
     rzone_table_.statistics_ = {};
     rzone_table_.statistics_.loaded_certificates =
         rzone_table_.certificates_.size();
-    for (const auto& masks : rzone_table_.masks_by_cell_count_) {
-        rzone_table_.statistics_.masks_indexed += masks.size();
-    }
+    rzone_table_.statistics_.masks_indexed = rzone_table_.patterns_.size();
 }
 
 SearchResult Solver::solve()

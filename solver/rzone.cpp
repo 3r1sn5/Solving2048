@@ -128,6 +128,29 @@ bool RZoneTable::sameCertificate(
            lhs.validated == rhs.validated;
 }
 
+std::size_t RZoneTable::phaseIndex(Phase phase)
+{
+    switch (phase) {
+        case Phase::Player: return 0;
+        case Phase::Environment: return 1;
+    }
+    throw std::invalid_argument("invalid RZone phase");
+}
+
+std::vector<RZoneCertificateId>& RZoneTable::patternIds(
+    const RZoneCertificate& certificate)
+{
+    const std::size_t phase = phaseIndex(certificate.phase);
+    const auto [mask_entry, new_mask] = patterns_.try_emplace(certificate.mask);
+    if (new_mask) ++statistics_.masks_indexed;
+    PatternBucket& bucket = mask_entry->second[phase];
+    if (bucket.empty()) {
+        masks_by_phase_[phase][countCells(certificate.mask)].push_back(
+            MaskIndexEntry{expandNibbleMask(certificate.mask), &bucket});
+    }
+    return bucket[certificate.masked_board];
+}
+
 std::optional<RZoneCertificateId> RZoneTable::publish(RZoneCertificate certificate)
 {
     if (!certificate.validated || certificate.mask == 0 ||
@@ -135,14 +158,7 @@ std::optional<RZoneCertificateId> RZoneTable::publish(RZoneCertificate certifica
         return std::nullopt;
     }
 
-    const auto [mask_entry, new_mask] = patterns_.try_emplace(certificate.mask);
-    if (new_mask) {
-        const unsigned cells = countCells(certificate.mask);
-        masks_by_cell_count_[cells].push_back(
-            MaskIndexEntry{certificate.mask, expandNibbleMask(certificate.mask)});
-        ++statistics_.masks_indexed;
-    }
-    auto& ids = mask_entry->second[certificate.masked_board];
+    auto& ids = patternIds(certificate);
     for (const RZoneCertificateId id : ids) {
         const RZoneCertificate* existing = find(id);
         if (existing && sameCertificate(*existing, certificate)) {
@@ -510,19 +526,16 @@ std::optional<RZoneMatch> RZoneTable::lookupFullScan(
     unsigned transform_count,
     Phase phase)
 {
+    const auto& masks_by_cell_count = masks_by_phase_[phaseIndex(phase)];
     const RZoneCertificate* best = nullptr;
     std::uint8_t best_transform = 0;
     for (unsigned cells = 1; cells <= max_cells_; ++cells) {
         for (unsigned transform = 0; transform < transform_count; ++transform) {
-            for (const MaskIndexEntry& indexed : masks_by_cell_count_[cells]) {
+            for (const MaskIndexEntry& indexed : masks_by_cell_count[cells]) {
                 ++statistics_.lookup_masks_tested;
-                const auto mask_entry = patterns_.find(indexed.mask);
-                if (mask_entry == patterns_.end()) {
-                    throw std::logic_error("RZone ordered mask index is inconsistent");
-                }
-                const auto found = mask_entry->second.find(
+                const auto found = indexed.bucket->find(
                     candidates[transform].raw & indexed.nibble_mask);
-                if (found == mask_entry->second.end()) continue;
+                if (found == indexed.bucket->end()) continue;
                 statistics_.lookup_candidates += found->second.size();
                 for (const RZoneCertificateId id : found->second) {
                     const RZoneCertificate* certificate = find(id);
@@ -555,19 +568,16 @@ std::optional<RZoneMatch> RZoneTable::lookupSmallestFirst(
     unsigned transform_count,
     Phase phase)
 {
+    const auto& masks_by_cell_count = masks_by_phase_[phaseIndex(phase)];
     for (unsigned cells = 1; cells <= max_cells_; ++cells) {
         const RZoneCertificate* best = nullptr;
         std::uint8_t best_transform = 0;
         for (unsigned transform = 0; transform < transform_count; ++transform) {
-            for (const MaskIndexEntry& indexed : masks_by_cell_count_[cells]) {
+            for (const MaskIndexEntry& indexed : masks_by_cell_count[cells]) {
                 ++statistics_.lookup_masks_tested;
-                const auto mask_entry = patterns_.find(indexed.mask);
-                if (mask_entry == patterns_.end()) {
-                    throw std::logic_error("RZone ordered mask index is inconsistent");
-                }
-                const auto found = mask_entry->second.find(
+                const auto found = indexed.bucket->find(
                     candidates[transform].raw & indexed.nibble_mask);
-                if (found == mask_entry->second.end()) continue;
+                if (found == indexed.bucket->end()) continue;
                 statistics_.lookup_candidates += found->second.size();
 
                 for (const RZoneCertificateId id : found->second) {

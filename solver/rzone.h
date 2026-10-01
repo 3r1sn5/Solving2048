@@ -108,6 +108,12 @@ public:
                bool trimming = true,
                bool full_board_placement_fallback = true);
 
+    // The ordered index borrows bucket addresses. Map moves preserve them,
+    // but a shallow copy would leave the index pointing into the source table.
+    RZoneTable(const RZoneTable&) = delete;
+    RZoneTable& operator=(const RZoneTable&) = delete;
+    RZoneTable(RZoneTable&&) = default;
+
     std::optional<RZoneCertificateId> createTerminal(Board board, Phase phase);
     std::optional<RZoneCertificateId> liftFixedSlide(
         Board parent,
@@ -157,10 +163,12 @@ private:
         std::unordered_map<std::uint64_t, std::vector<RZoneCertificateId>>;
 
     struct MaskIndexEntry {
-        std::uint16_t mask = 0;
         std::uint64_t nibble_mask = 0;
+        const PatternBucket* bucket = nullptr;
     };
 
+    static std::size_t phaseIndex(Phase phase);
+    std::vector<RZoneCertificateId>& patternIds(const RZoneCertificate& certificate);
     std::optional<RZoneCertificateId> publish(RZoneCertificate certificate);
     bool maskContainsOnlyNonEmpty(Board board, std::uint16_t mask) const;
     bool sameCertificate(const RZoneCertificate& lhs, const RZoneCertificate& rhs) const;
@@ -196,8 +204,11 @@ private:
     // IDs and returned references remain stable while later certificates are
     // appended; certificates are immutable after publication.
     std::deque<RZoneCertificate> certificates_;
-    std::unordered_map<std::uint16_t, PatternBucket> patterns_;
-    std::array<std::vector<MaskIndexEntry>, 17> masks_by_cell_count_;
+    // A mask is counted once globally, but each phase owns its pattern bucket
+    // and ordered mask list. unordered_map rehash preserves bucket addresses;
+    // no buckets are erased while their index entries remain in use.
+    std::unordered_map<std::uint16_t, std::array<PatternBucket, 2>> patterns_;
+    std::array<std::array<std::vector<MaskIndexEntry>, 17>, 2> masks_by_phase_;
     RZoneStatistics statistics_;
 };
 

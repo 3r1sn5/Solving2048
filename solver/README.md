@@ -293,6 +293,14 @@ cell count because every smaller group has already missed. Each indexed mask als
 64-bit nibble mask, so lookup performs one AND instead of rebuilding it from
 sixteen cells.
 
+The lookup index has separate Player and Environment buckets and mask lists.
+Each ordered mask entry directly references its phase's pattern bucket, avoiding
+an outer mask hash lookup on every test. These references survive mask-map
+rehashing and batch proof handoff; loading a `.rz` snapshot rebuilds the index.
+Certificate IDs, match tie-breaking, and the persistent format are unchanged.
+`RZone unique masks` still counts distinct masks across both phases once;
+mask-test and candidate counters now count only work in the queried phase.
+
 `use_rzone_symmetry=true` (or `--rzone-symmetry`) computes all eight D4 versions
 of the candidate board and searches the existing one-copy index. The returned
 transform maps the current board into the stored certificate orientation;

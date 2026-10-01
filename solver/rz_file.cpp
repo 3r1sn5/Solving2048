@@ -682,23 +682,17 @@ RzFileSummary RzFile::load(const std::filesystem::path& path, RZoneTable& table)
         fail(path, error.what());
     }
 
+    for (auto& phase_masks : table.masks_by_phase_) {
+        for (auto& masks : phase_masks) masks.clear();
+    }
     table.patterns_.clear();
-    for (auto& masks : table.masks_by_cell_count_) masks.clear();
     table.certificates_.clear();
     table.statistics_ = {};
     for (const RZoneCertificate& certificate : certificates) {
         table.certificates_.push_back(certificate);
         const unsigned cells = RZoneTable::countCells(certificate.mask);
         if (cells > table.max_cells_) continue;
-        const auto [mask_entry, new_mask] = table.patterns_.try_emplace(certificate.mask);
-        if (new_mask) {
-            table.masks_by_cell_count_[cells].push_back({
-                certificate.mask,
-                RZoneTable::expandNibbleMask(certificate.mask),
-            });
-            ++table.statistics_.masks_indexed;
-        }
-        mask_entry->second[certificate.masked_board].push_back(certificate.id);
+        table.patternIds(certificate).push_back(certificate.id);
     }
     table.statistics_.loaded_certificates = certificates.size();
     return {record_count, checksum, file_size};
