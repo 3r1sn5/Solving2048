@@ -3,6 +3,7 @@
 #include "proof_checker.h"
 #include "proof_sequence.h"
 #include "rz_file.h"
+#include "rzone_slide.h"
 #include "search.h"
 #include "sgf.h"
 #include "tt_file.h"
@@ -903,6 +904,27 @@ void testSolverConfigParsingAndValidation()
     legacy_text.erase(legacy_text.find(active_setting), active_setting.size());
     TemporaryConfigFile legacy(legacy_text);
     const SolverConfig legacy_config = solver2048::loadSolverConfig(legacy.path);
+    check(legacy_config.rzone_trimming && legacy_config.rzone_full_board_placement_fallback,
+          "legacy cfg files must keep trimming and full-board fallback enabled");
+    for (bool trimming : {false, true}) {
+        for (bool fallback : {false, true}) {
+            TemporaryConfigFile toggles(validConfigText() +
+                "rzone_trimming=" + (trimming ? "true" : "false") + "\n" +
+                "rzone_full_board_placement_fallback=" + (fallback ? "true" : "false") + "\n");
+            const auto config = solver2048::loadSolverConfig(toggles.path);
+            check(config.rzone_trimming == trimming &&
+                      config.rzone_full_board_placement_fallback == fallback,
+                  "RZone generation switches must parse independently");
+        }
+    }
+    for (const auto* key : {"rzone_trimming", "rzone_full_board_placement_fallback"}) {
+        TemporaryConfigFile invalid(validConfigText() + key + "=maybe\n");
+        checkThrows([&] { (void)solver2048::loadSolverConfig(invalid.path); },
+                    "RZone generation switches must reject invalid boolean values");
+        TemporaryConfigFile duplicate(validConfigText() + key + "=true\n" + key + "=false\n");
+        checkThrows([&] { (void)solver2048::loadSolverConfig(duplicate.path); },
+                    "RZone generation switches must reject duplicate keys");
+    }
     check(!legacy_config.rzone_active_pruning,
           "legacy cfg files must default active pruning to disabled");
 
@@ -1604,6 +1626,15 @@ void testFullBoardPlacementFallback()
     check(loaded.lookup(parent, Phase::Environment).has_value() &&
               proof.find(*fallback)->kind == RZoneStepKind::FullBoardPlacement,
           "both readers must validate and retain full-board proofs");
+    RZoneTable disabled(game, 16, 16, RZoneLookupPolicy::FullScan, false, true, false);
+    RzFile::load(snapshot.path, disabled);
+    const auto disabled_size = disabled.size();
+    check(!disabled.liftFullBoardPlacement(parent, witnesses) &&
+              disabled.size() == disabled_size &&
+              disabled.statistics().full_board_placement_certificates == 0,
+          "disabled fallback must not generate full-board placement certificates");
+    check(disabled.lookup(parent, Phase::Environment).has_value(),
+          "disabled generation must preserve lookup of loaded fallback certificates");
     RZoneTable symmetric(game, 16, 16, RZoneLookupPolicy::SmallestFirst, true);
     RzFile::load(snapshot.path, symmetric);
     for (std::uint8_t transform = 0; transform < 8; ++transform) {
@@ -1662,6 +1693,144 @@ void testFullBoardPlacementFallback()
     check(upper.has_value(), "full-board fallback must allow upward Player propagation");
     RzFile::save(snapshot.path, lift_table);
     (void)RzProofTable::load(snapshot.path);
+}
+
+void testImprovedRZoneTrimming()
+{
+    MechanicsGame game;
+    RZoneTable table(game, 32);
+    const auto terminal = table.createTerminal(tiles({{13, 32}}), Phase::Environment);
+    const Board first = tiles({{0, 2}, {4, 4}, {8, 8}, {9, 2},
+                               {12, 2}, {13, 16}, {14, 16}, {15, 2}});
+    RZoneTable untrimmed(game, 32, 16, RZoneLookupPolicy::FullScan, false, false);
+    const auto untrimmed_terminal = untrimmed.createTerminal(tiles({{13, 32}}), Phase::Environment);
+    const auto original_pair = untrimmed.liftFixedSlide(first, Direction::Left, *untrimmed_terminal);
+    check(original_pair && untrimmed.find(*original_pair)->mask == 0x7000 &&
+              untrimmed.statistics().trim_attempts == 0 &&
+              untrimmed.statistics().trim_cells_removed == 0 &&
+              untrimmed.statistics().trimmed_certificates == 0,
+          "disabled trimming must retain the original preimage without trim work");
+    RZoneTable untrimmed_limited(game, 32, 2, RZoneLookupPolicy::FullScan, false, false);
+    const auto limited_end = untrimmed_limited.createTerminal(tiles({{13, 32}}), Phase::Environment);
+    check(!untrimmed_limited.liftFixedSlide(first, Direction::Left, *limited_end),
+          "disabled trimming must apply max_cells to the original preimage");
+    const auto pair = table.liftFixedSlide(first, Direction::Left, *terminal);
+    check(pair && table.find(*pair)->mask == 0x6000,
+          "first image must trim 2,16,16 to the two adjacent 16s");
+    const auto environment = table.liftUniversalPlacement(first, *pair);
+    check(environment.has_value(), "trimmed pair must lift across placements");
+    const Board second = tiles({{0, 4}, {1, 2}, {4, 4}, {8, 4}, {9, 8},
+                                {12, 2}, {13, 8}, {14, 16}, {15, 2}});
+    const auto triple = table.liftFixedSlide(second, Direction::Down, *environment);
+    check(triple && table.find(*triple)->mask == 0x6200,
+          "second image must retain only 8,8,16, including early-win alternatives");
+    check(table.liftUniversalPlacement(second, *triple).has_value(),
+          "removing the three empty constraints must enable upward placement lift");
+    check(table.statistics().trim_cells_removed >= 4 &&
+              table.statistics().trimmed_certificates >= 2,
+          "trim statistics must record successful removals");
+    RZoneTable limited(game, 32, 2);
+    const auto limited_terminal = limited.createTerminal(tiles({{13, 32}}), Phase::Environment);
+    check(limited.liftFixedSlide(first, Direction::Left, *limited_terminal).has_value(),
+          "max_cells must be applied after trimming");
+
+    TemporaryRzFile snapshot;
+    RzFile::save(snapshot.path, table);
+    RZoneTable loaded(game, 32);
+    RzFile::load(snapshot.path, loaded);
+    const auto proof = RzProofTable::load(snapshot.path);
+    check(proof.find(*triple)->mask == 0x6200 && loaded.find(*pair)->mask == 0x6000,
+          "both readers must validate improved certificates");
+    for (unsigned legacy : {1u, 2u}) {
+        writeByte(snapshot.path, 28, static_cast<std::uint8_t>(legacy));
+        RZoneTable rejected(game, 32);
+        checkThrows([&] { RzFile::load(snapshot.path, rejected); },
+                    "legacy semantics must reject moved winning positions");
+        checkThrows([&] { RzProofTable::load(snapshot.path); },
+                    "independent legacy checker must reject new semantics");
+    }
+
+    // The discussed A,16,B,16 counterexample: freeing B is safe while A=2;
+    // freeing A with B fixed to zero is safe, but freeing both is unsound.
+    RZoneTable interaction(game, 32);
+    const Board child_board = tiles({{1, 16}, {5, 16}});
+    const auto end = interaction.createTerminal(tiles({{1, 32}}), Phase::Environment);
+    const auto player = interaction.liftFixedSlide(child_board, Direction::Up, *end);
+    const auto child = interaction.liftUniversalPlacement(child_board, *player);
+    const Board source = tiles({{0, 2}, {1, 16}, {2, 2}, {3, 16},
+                                {4, 4}, {5, 4}, {6, 16}, {7, 2}});
+    const auto implies = [&](Board board, std::uint16_t mask) {
+        return solver2048::improvedSlideImplies(board.raw, mask, Direction::Left, 32,
+                                                child_board.raw, 0x0022);
+    };
+    check(implies(source, 0x00fb), "free B with A fixed must succeed");
+    check(implies(Board{source.raw & ~(0xfull << 8)}, 0x00fe),
+          "free A with B fixed empty must succeed");
+    check(!implies(source, 0x00fa), "joint A/B variation must be rejected");
+    const auto parent = interaction.liftFixedSlide(source, Direction::Left, *child);
+    check(parent && (interaction.find(*parent)->mask & 1u) &&
+              !(interaction.find(*parent)->mask & 4u),
+          "greedy trim must keep A after removing B");
+    RzFile::save(snapshot.path, interaction);
+    (void)RzProofTable::load(snapshot.path);
+    const auto offset = RzFile::kHeaderSize + (*parent - 1) * RzFile::kRecordSize;
+    writeByte(snapshot.path, offset, readByte(snapshot.path, offset) & 0xf0u);
+    writeByte(snapshot.path, offset + 16, readByte(snapshot.path, offset + 16) & 0xfeu);
+    refreshRzChecksum(snapshot.path);
+    RZoneTable rejected(game, 32);
+    checkThrows([&] { RzFile::load(snapshot.path, rejected); },
+                "loader must reject the joint-interaction counterexample");
+    checkThrows([&] { RzProofTable::load(snapshot.path); },
+                "independent checker must reject the joint-interaction counterexample");
+
+    // Compare the line summary against exhaustive whole-board game mechanics,
+    // including child zeros, all directions, and several free cells across lines.
+    std::uint64_t rng = 0xa5b7c91342ull;
+    auto random = [&]() { rng = rng * 6364136223846793005ull + 1; return rng >> 32; };
+    for (int sample = 0; sample < 256; ++sample) {
+        const unsigned target = sample % 2 ? 8 : 16;
+        const unsigned rank_count = sample % 2 ? 3 : 4;
+        Board source_board{};
+        for (int p = 0; p < 16; ++p) source_board.raw |= (random() % rank_count) << (4 * p);
+        std::uint16_t mask = 0xffff;
+        std::vector<int> free;
+        while (free.size() < 4) {
+            const int p = random() % 16;
+            if (!(mask & (1u << p))) continue;
+            free.push_back(p);
+            mask &= ~(1u << p);
+        }
+        const auto direction = static_cast<Direction>(sample % 4);
+        const auto child_mask = static_cast<std::uint16_t>(random());
+        Board expected{};
+        for (const auto& move : game.legalSlides(source_board))
+            if (move.direction == direction) expected = move.afterstate;
+        const auto child_pattern = RZoneTable::maskedBoard(expected, child_mask);
+        bool exhaustive = true;
+        std::function<void(Board, unsigned)> enumerate = [&](Board board, unsigned index) {
+            if (!exhaustive) return;
+            if (index < free.size()) {
+                const unsigned shift = 4 * free[index];
+                for (unsigned rank = 0; rank < rank_count; ++rank)
+                    enumerate(Board{(board.raw & ~(0xfull << shift)) |
+                                    (std::uint64_t{rank} << shift)}, index + 1);
+                return;
+            }
+            bool accepted = false;
+            for (const auto& move : game.legalSlides(board)) {
+                if (move.direction != direction) continue;
+                accepted = game.hasWinningTile(move.afterstate, target) ||
+                    RZoneTable::maskedBoard(move.afterstate, child_mask) == child_pattern;
+            }
+            exhaustive = accepted;
+        };
+        enumerate(source_board, 0);
+        check(exhaustive == solver2048::improvedSlideImplies(
+                  source_board.raw, mask, direction, target, child_pattern, child_mask),
+              "line-based implication must equal exhaustive whole-board validation");
+    }
+    check(!solver2048::improvedSlideImplies(0, 0xffff, Direction::Left, 32, 0, 0xffff),
+          "matching an empty child must not excuse an illegal slide");
 }
 
 void testPersistentRzRejectsIncompatibleAndCorruptFiles()
@@ -2170,6 +2339,33 @@ void testRealGameApiAndThreeNodeSearch()
                   symmetry_rzone_result.statistics.rzone.lookup_masks_tested,
           "target-8 active pruning must avoid full RZone lookup work");
     checkTraceIdsAreDfsDiscoveryOrder(*active_rzone_result.root);
+
+    for (bool active : {false, true}) {
+        for (bool trimming : {false, true}) {
+            for (bool fallback : {false, true}) {
+                if (trimming && fallback) continue; // Already solved above.
+                auto options = symmetry_rzone_options;
+                options.rzone_active_pruning = active;
+                options.rzone_trimming = trimming;
+                options.rzone_full_board_placement_fallback = fallback;
+                Solver toggled(game, options);
+                const auto result = toggled.solve();
+                const auto& rz = result.statistics.rzone;
+                check(result.outcome == symmetry_rzone_result.outcome &&
+                          result.root_action == symmetry_rzone_result.root_action,
+                      "RZone generation switches must preserve the target-8 solution");
+                if (!trimming) {
+                    check(rz.trim_attempts == 0 && rz.trim_cells_removed == 0 &&
+                              rz.trimmed_certificates == 0,
+                          "Solver must propagate disabled trimming into RZoneTable");
+                }
+                if (!fallback) {
+                    check(rz.full_board_placement_certificates == 0,
+                          "Solver must suppress fallback with and without active pruning");
+                }
+            }
+        }
+    }
 
     TemporaryTtFile proof_tt;
     const TtFileSummary proof_summary = TtFile::save(proof_tt.path, symmetry_solver);
@@ -2719,6 +2915,8 @@ void testSgfActionEncodingEscapingAndOrder()
     metadata.use_rzone_symmetry = true;
     metadata.rzone_max_cells = 12;
     metadata.rzone_active_pruning = true;
+    metadata.rzone_trimming = false;
+    metadata.rzone_full_board_placement_fallback = true;
     metadata.load_tt = true;
     metadata.save_tt = true;
     metadata.tt_path = "solver/tt/test.tt";
@@ -2781,6 +2979,8 @@ void testSgfActionEncodingEscapingAndOrder()
               sgf.find("rzone_symmetry = enabled") != std::string::npos &&
               sgf.find("rzone_max_cells = 12") != std::string::npos &&
               sgf.find("rzone_active_pruning = enabled") != std::string::npos &&
+              sgf.find("rzone_trimming = disabled") != std::string::npos &&
+              sgf.find("rzone_full_board_placement_fallback = enabled") != std::string::npos &&
               sgf.find("rzone_loaded_certificates = 5") != std::string::npos &&
               sgf.find("rzone_patterns_stored = 9") != std::string::npos &&
               sgf.find("rzone_active_pruning_children_matched = 11") != std::string::npos &&
@@ -2864,6 +3064,7 @@ int main()
         {"solver.cfg parsing and validation", testSolverConfigParsingAndValidation},
         {"RZone certificate lifts and replay-free lookup", testRZoneCertificateLiftsAndLookup},
         {"full-board placement fallback and independent validation", testFullBoardPlacementFallback},
+        {"RZone improved trimming and completion interactions", testImprovedRZoneTrimming},
         {"RZone active pruning covers Environment siblings",
          testRZoneActivePruningCoversEnvironmentSiblings},
         {"D4 canonicalization and action transforms", testD4CanonicalizationAndActionTransforms},

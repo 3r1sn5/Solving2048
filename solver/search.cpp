@@ -58,7 +58,9 @@ Solver::Solver(const Game& game, SolverOptions options, ProgressCallback progres
                    options.winning_tile,
                    options.rzone_max_cells,
                    options.rzone_lookup_policy,
-                   options.use_rzone_symmetry)
+                   options.use_rzone_symmetry,
+                   options.rzone_trimming,
+                   options.rzone_full_board_placement_fallback)
 {
     if (options_.winning_tile < 2 || (options_.winning_tile & (options_.winning_tile - 1)) != 0) {
         throw std::invalid_argument("winning tile must be a power of two and at least 2");
@@ -654,7 +656,8 @@ Outcome Solver::solveEnvironment(Board afterstate, TraceNode& trace)
         } else {
             liftEnvironmentRZone(afterstate, trace);
         }
-        if (options_.rzone_mode != RZoneMode::Disabled && !trace.rzone_certificate_id) {
+        if (options_.rzone_mode != RZoneMode::Disabled &&
+            options_.rzone_full_board_placement_fallback && !trace.rzone_certificate_id) {
             std::vector<RZoneMatch> witnesses;
             for (const auto& child : trace.children) {
                 if (!child->rzone_certificate_id) break;

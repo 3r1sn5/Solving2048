@@ -329,6 +329,8 @@ SolverOptions solverOptions(const SolverConfig& settings)
     options.rzone_max_cells = settings.rzone_max_cells;
     options.rzone_shadow_exact_check = settings.rzone_shadow_exact_check;
     options.rzone_active_pruning = settings.rzone_active_pruning;
+    options.rzone_trimming = settings.rzone_trimming;
+    options.rzone_full_board_placement_fallback = settings.rzone_full_board_placement_fallback;
     return options;
 }
 
@@ -380,6 +382,8 @@ SgfMetadata batchSgfMetadata(
     metadata.rzone_max_cells = settings.rzone_max_cells;
     metadata.rzone_shadow_exact_check = settings.rzone_shadow_exact_check;
     metadata.rzone_active_pruning = settings.rzone_active_pruning;
+    metadata.rzone_trimming = settings.rzone_trimming;
+    metadata.rzone_full_board_placement_fallback = settings.rzone_full_board_placement_fallback;
     metadata.load_tt = has_prior_opening;
     metadata.save_tt = final_opening;
     metadata.tt_path = tt_path;
@@ -640,6 +644,10 @@ int main(int argc, char** argv)
                   << (settings.rzone_shadow_exact_check ? "enabled" : "disabled") << '\n'
                   << "RZone active pruning: "
                   << (settings.rzone_active_pruning ? "enabled" : "disabled") << '\n'
+                  << "RZone trimming: "
+                  << (settings.rzone_trimming ? "enabled" : "disabled") << '\n'
+                  << "RZone full-board placement fallback: "
+                  << (settings.rzone_full_board_placement_fallback ? "enabled" : "disabled") << '\n'
                   << "network: " << settings.network << '\n'
                   << "model: " << settings.model_path << '\n'
                   << "SGF output: " << settings.sgf_path.string() << '\n';
@@ -737,6 +745,8 @@ int main(int argc, char** argv)
         metadata.rzone_max_cells = settings.rzone_max_cells;
         metadata.rzone_shadow_exact_check = settings.rzone_shadow_exact_check;
         metadata.rzone_active_pruning = settings.rzone_active_pruning;
+        metadata.rzone_trimming = settings.rzone_trimming;
+        metadata.rzone_full_board_placement_fallback = settings.rzone_full_board_placement_fallback;
         metadata.load_tt = settings.load_tt;
         metadata.save_tt = settings.save_tt;
         metadata.tt_path = settings.tt_path;
@@ -821,6 +831,9 @@ int main(int argc, char** argv)
                       << "RZone unique masks: " << rzone.masks_indexed << '\n'
                       << "RZone masks tested: " << rzone.lookup_masks_tested << '\n'
                       << "RZone lookup candidates: " << rzone.lookup_candidates << '\n'
+                      << "RZone trim attempts: " << rzone.trim_attempts << '\n'
+                      << "RZone trim cells removed: " << rzone.trim_cells_removed << '\n'
+                      << "RZone trimmed certificates: " << rzone.trimmed_certificates << '\n'
                       << "RZone pattern matches: " << rzone.pattern_matches << '\n'
                       << "RZone early exits: " << rzone.lookup_early_exits << '\n'
                       << "RZone player hits: " << rzone.player_hits << '\n'

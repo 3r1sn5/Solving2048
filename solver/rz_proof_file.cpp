@@ -326,6 +326,58 @@ void validateFixedSlide(const RzProofEntry& parent, const RzProofEntry& child)
     }
 }
 
+// Independent verifier: enumerate each line's reachable (changed, winning,
+// mismatch) states, then take their Cartesian product by OR-ing the flags.
+// This checks the whole-board disjunction without enumerating whole boards.
+void validateImprovedFixedSlide(const RzProofEntry& parent,
+                               const RzProofEntry& child, unsigned winning_rank)
+{
+    for (int p = 0; p < kBoardCells; ++p)
+        if ((parent.mask & (1u << p)) && cellRank(parent.masked_board, p) >= winning_rank)
+            return;
+    unsigned reachable = 1u; // Only the empty combination, with no flags set.
+    for (int line = 0; line < kBoardSize; ++line) {
+        const auto positions = linePositions(*parent.slide, line);
+        std::array<unsigned, kBoardSize> input{};
+        unsigned line_states = 0;
+        std::function<void(int)> enumerate = [&](int offset) {
+            if (offset < kBoardSize) {
+                const int p = positions[offset];
+                if (parent.mask & (1u << p)) {
+                    input[offset] = cellRank(parent.masked_board, p);
+                    enumerate(offset + 1);
+                } else for (unsigned rank = 0; rank < winning_rank; ++rank) {
+                    input[offset] = rank;
+                    enumerate(offset + 1);
+                }
+                return;
+            }
+            const auto output = slideLine(input);
+            unsigned flags = output != input ? 1u : 0u;
+            for (int i = 0; i < kBoardSize; ++i) {
+                if (output[i] >= winning_rank) flags |= 2u;
+                if ((child.mask & (1u << positions[i])) &&
+                    output[i] != cellRank(child.masked_board, positions[i])) flags |= 4u;
+            }
+            line_states |= 1u << flags;
+        };
+        enumerate(0);
+        unsigned combined = 0;
+        for (unsigned a = 0; a < 8; ++a)
+            for (unsigned b = 0; b < 8; ++b)
+                if ((reachable & (1u << a)) && (line_states & (1u << b)))
+                    combined |= 1u << (a | b);
+        reachable = combined;
+    }
+    for (unsigned flags = 0; flags < 8; ++flags) {
+        if (!(reachable & (1u << flags))) continue;
+        if (!(flags & 1u))
+            throw std::invalid_argument("FixedSlide pattern does not guarantee a legal action");
+        if (!(flags & 2u) && (flags & 4u))
+            throw std::invalid_argument("FixedSlide fails terminal-or-child implication");
+    }
+}
+
 std::vector<RzProofEntry> validateRecords(
     const std::vector<DiskRecord>& records,
     unsigned winning_tile, unsigned semantics_version)
@@ -415,7 +467,9 @@ std::vector<RzProofEntry> validateRecords(
                             "FixedSlide phase, child phase, or direction is invalid");
                     }
                     entry.slide = static_cast<Direction>(record.argument);
-                    validateFixedSlide(entry, child);
+                    if (semantics_version >= 3)
+                        validateImprovedFixedSlide(entry, child, winning_rank);
+                    else validateFixedSlide(entry, child);
                 } else {
                     if (entry.phase != Phase::Environment ||
                         child.phase != Phase::Player || record.argument != kNoArgument) {
@@ -484,8 +538,8 @@ RzProofTable RzProofTable::load(const std::filesystem::path& path)
     if (get32(header.data() + 24) != kBoardEncodingVersion) {
         fail(path, "incompatible board encoding version");
     }
-    if (get32(header.data() + 28) != 1 &&
-        get32(header.data() + 28) != RzFile::kSemanticsVersion) {
+    if (get32(header.data() + 28) < 1 ||
+        get32(header.data() + 28) > RzFile::kSemanticsVersion) {
         fail(path, "incompatible RZone semantics version");
     }
     const unsigned winning_tile = get32(header.data() + 32);

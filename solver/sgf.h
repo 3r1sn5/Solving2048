@@ -21,6 +21,8 @@ struct SgfMetadata {
     unsigned rzone_max_cells = 16;
     bool rzone_shadow_exact_check = false;
     bool rzone_active_pruning = false;
+    bool rzone_trimming = true;
+    bool rzone_full_board_placement_fallback = true;
     bool load_tt = false;
     bool save_tt = false;
     std::filesystem::path tt_path;

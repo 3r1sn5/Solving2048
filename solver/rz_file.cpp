@@ -2,6 +2,7 @@
 #include "rz_file.h"
 
 #include "rzone.h"
+#include "rzone_slide.h"
 #include "search.h"
 
 #include <algorithm>
@@ -540,7 +541,13 @@ std::vector<RZoneCertificate> validateRecords(
                             "FixedSlide phase, child phase, or direction is invalid");
                     }
                     certificate.slide = static_cast<Direction>(record.argument);
-                    validateFixedSlide(certificate, child);
+                    if (semantics_version >= 3) {
+                        if (!improvedSlideImplies(certificate.masked_board, certificate.mask,
+                                                 *certificate.slide, winning_tile,
+                                                 child.masked_board, child.mask)) {
+                            throw std::invalid_argument("FixedSlide fails terminal-or-child implication");
+                        }
+                    } else validateFixedSlide(certificate, child);
                 } else {
                     if (certificate.phase != Phase::Environment ||
                         child.phase != Phase::Player || record.argument != kNoArgument) {
@@ -622,8 +629,8 @@ RzFileSummary RzFile::load(const std::filesystem::path& path, RZoneTable& table)
     if (get32(header.data() + 24) != kBoardEncodingVersion) {
         fail(path, "incompatible board encoding version");
     }
-    if (get32(header.data() + 28) != 1 &&
-        get32(header.data() + 28) != kSemanticsVersion) {
+    if (get32(header.data() + 28) < 1 ||
+        get32(header.data() + 28) > kSemanticsVersion) {
         fail(path, "incompatible RZone semantics version");
     }
     const unsigned winning_tile = get32(header.data() + 32);

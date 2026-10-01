@@ -1,4 +1,5 @@
 #include "rzone.h"
+#include "rzone_slide.h"
 
 #include "search.h"
 
@@ -46,12 +47,16 @@ RZoneTable::RZoneTable(const Game& game,
                        unsigned winning_tile,
                        unsigned max_cells,
                        RZoneLookupPolicy lookup_policy,
-                       bool use_symmetry)
+                       bool use_symmetry,
+                       bool trimming,
+                       bool full_board_placement_fallback)
     : game_(game),
       winning_tile_(winning_tile),
       max_cells_(max_cells),
       lookup_policy_(lookup_policy),
-      use_symmetry_(use_symmetry)
+      use_symmetry_(use_symmetry),
+      trimming_(trimming),
+      full_board_placement_fallback_(full_board_placement_fallback)
 {
     if (winning_tile_ < 2 || (winning_tile_ & (winning_tile_ - 1)) != 0) {
         throw std::invalid_argument("RZone winning tile must be a power of two");
@@ -272,12 +277,52 @@ std::optional<RZoneCertificateId> RZoneTable::liftFixedSlide(
         ++statistics_.slide_lift_failures;
         return std::nullopt;
     }
-    const std::uint16_t parent_mask = deriveSlidePreimageMask(parent, direction, child->mask);
-    if (parent_mask == 0 || countCells(parent_mask) > max_cells_ ||
+    std::uint16_t parent_mask = deriveSlidePreimageMask(parent, direction, child->mask);
+    if (parent_mask == 0 ||
         maskedBoard(selected->afterstate, child->mask) != child->masked_board) {
         ++statistics_.slide_lift_failures;
         return std::nullopt;
     }
+
+    const auto original_mask = parent_mask;
+    if (trimming_) {
+        // Freeze the merge sources from the original slide. Empty constrained cells
+        // and non-merged tiles are candidates; removed cells remain free variables.
+        std::uint16_t merged_mask = 0;
+        for (int line = 0; line < kBoardSize; ++line) {
+            std::array<int, kBoardSize> occupied{};
+            int size = 0;
+            for (int p : linePositions(direction, line))
+                if (cellRank(parent, p)) occupied[size++] = p;
+            for (int i = 0; i + 1 < size; ++i) {
+                if (cellRank(parent, occupied[i]) != cellRank(parent, occupied[i + 1])) continue;
+                merged_mask |= static_cast<std::uint16_t>((1u << occupied[i]) | (1u << occupied[i + 1]));
+                ++i;
+            }
+        }
+        while (true) {
+            bool removed = false;
+            for (int p = 0; p < kBoardCells; ++p) {
+                const auto bit = static_cast<std::uint16_t>(1u << p);
+                if (!(parent_mask & bit) || (merged_mask & bit)) continue;
+                const auto candidate = static_cast<std::uint16_t>(parent_mask & ~bit);
+                if (!candidate) continue;
+                ++statistics_.trim_attempts;
+                if (!improvedSlideImplies(parent.raw, candidate, direction, winning_tile_,
+                                         child->masked_board, child->mask)) continue;
+                parent_mask = candidate;
+                ++statistics_.trim_cells_removed;
+                removed = true;
+                break;
+            }
+            if (!removed) break;
+        }
+    }
+    if (countCells(parent_mask) > max_cells_) {
+        ++statistics_.slide_lift_failures;
+        return std::nullopt;
+    }
+    if (parent_mask != original_mask) ++statistics_.trimmed_certificates;
 
     RZoneCertificate certificate;
     certificate.kind = RZoneStepKind::FixedSlide;
@@ -336,7 +381,7 @@ std::optional<RZoneCertificateId> RZoneTable::liftUniversalPlacement(
 std::optional<RZoneCertificateId> RZoneTable::liftFullBoardPlacement(
     Board parent, const std::vector<RZoneMatch>& children)
 {
-    if (max_cells_ < 16) return std::nullopt;
+    if (!full_board_placement_fallback_ || max_cells_ < 16) return std::nullopt;
     const auto placements = game_.legalPlacements(parent);
     if (placements.empty() || placements.size() != children.size()) return std::nullopt;
     RZoneCertificate certificate;

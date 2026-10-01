@@ -64,6 +64,9 @@ struct RZoneStatistics {
     std::uint64_t slide_lift_attempts = 0;
     std::uint64_t slide_lift_successes = 0;
     std::uint64_t slide_lift_failures = 0;
+    std::uint64_t trim_attempts = 0;
+    std::uint64_t trim_cells_removed = 0;
+    std::uint64_t trimmed_certificates = 0;
     std::uint64_t placement_lift_attempts = 0;
     std::uint64_t placement_lift_successes = 0;
     std::uint64_t placement_lift_blocked = 0;
@@ -101,7 +104,9 @@ public:
                unsigned winning_tile,
                unsigned max_cells = 16,
                RZoneLookupPolicy lookup_policy = RZoneLookupPolicy::FullScan,
-               bool use_symmetry = false);
+               bool use_symmetry = false,
+               bool trimming = true,
+               bool full_board_placement_fallback = true);
 
     std::optional<RZoneCertificateId> createTerminal(Board board, Phase phase);
     std::optional<RZoneCertificateId> liftFixedSlide(
@@ -186,6 +191,8 @@ private:
     unsigned max_cells_ = 16;
     RZoneLookupPolicy lookup_policy_ = RZoneLookupPolicy::FullScan;
     bool use_symmetry_ = false;
+    bool trimming_ = true;
+    bool full_board_placement_fallback_ = true;
     // IDs and returned references remain stable while later certificates are
     // appended; certificates are immutable after publication.
     std::deque<RZoneCertificate> certificates_;

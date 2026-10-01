@@ -216,6 +216,8 @@ SolverConfig loadSolverConfig(
         "rzone_max_cells",
         "rzone_shadow_exact_check",
         "rzone_active_pruning",
+        "rzone_trimming",
+        "rzone_full_board_placement_fallback",
         "load_rz",
         "save_rz",
         "rz_path",
@@ -226,8 +228,10 @@ SolverConfig loadSolverConfig(
     };
     static const std::unordered_set<std::string> optional = {
         // Added after the original strict cfg format. Keep older experiment
-        // files usable; absence means the feature is disabled.
+        // files usable; absent keys retain their SolverConfig defaults.
         "rzone_active_pruning",
+        "rzone_trimming",
+        "rzone_full_board_placement_fallback",
     };
 
     std::string line_text;
@@ -289,6 +293,10 @@ SolverConfig loadSolverConfig(
             result.rzone_shadow_exact_check = parseBool(value, path, line_number, key);
         } else if (key == "rzone_active_pruning") {
             result.rzone_active_pruning = parseBool(value, path, line_number, key);
+        } else if (key == "rzone_trimming") {
+            result.rzone_trimming = parseBool(value, path, line_number, key);
+        } else if (key == "rzone_full_board_placement_fallback") {
+            result.rzone_full_board_placement_fallback = parseBool(value, path, line_number, key);
         } else if (key == "load_rz") {
             result.load_rz = parseBool(value, path, line_number, key);
         } else if (key == "save_rz") {

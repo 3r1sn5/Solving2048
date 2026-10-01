@@ -9,11 +9,80 @@ This directory contains the first brute-force AND-OR DFS solver described in
 make solver
 ```
 
+The default standard flag is `-std=c++2a` for compatibility with GCC 9.
+You can override it explicitly, for example with `make solver STD=c++20`
+when using a compiler that supports that spelling.
+
 The executable is `solver/solver2048`. It reuses the board mechanics and the
 read-only N-tuple evaluator exposed by `2048.cpp`. A raw DFS baseline remains
 available, while the shipped runtime configuration enables the practical exact
 TT plus D4 symmetry mode. The transposition table merges repeated `(board,
 phase)` states, with separately controlled D4 symmetry canonicalization.
+
+## RZone baseline runner
+
+From the repository root, run:
+
+```bash
+python3 solver/tools/run_rzone_baseline.py --dry-run
+python3 solver/tools/run_rzone_baseline.py
+```
+
+By default this rebuilds and freezes the solver/checker in
+`result/baselinev2/bin`, then runs targets **4, 8, 16, 32** with all seven modes:
+
+| Mode | TT | TT symmetry | RZone | RZone symmetry | Active pruning |
+| --- | --- | --- | --- | --- | --- |
+| `DFS` | off | off | off | off | off |
+| `DFS_TT` | on | off | off | off | off |
+| `DFS_TT_sym` | on | on | off | off | off |
+| `DFS_RZ` | off | off | on | off | off |
+| `DFS_RZ_sym` | off | off | on | on | off |
+| `DFS_RZ_sym_prune` | off | off | on | on | on |
+| `DFS_TT_sym_RZ_sym_prune` | on | on | on | on | on |
+
+All **28 cases** run sequentially with opening `2@0,2@1`, full-board fallback
+**enabled**, trimming **disabled**, and fresh TT/RZ caches. Fallback only applies
+to modes with RZone enabled. The default per-case node limit is **100,000,000**,
+matching the old suite; `--node-limit 0` removes the limit. There is no wall-time
+limit. A node-limited `UNKNOWN` is recorded as `INCOMPLETE` and is not proof-checked.
+A failed solve or proof check is recorded as `FAILED`. Both continue to the next
+case; the runner exits nonzero if any case is incomplete or failed. Interruptions
+stop the suite. Existing output directories must be empty; results are never overwritten.
+
+To run only target 32 with TT/RZ symmetry and active pruning:
+
+```bash
+python3 solver/tools/run_rzone_baseline.py --targets 32 --modes DFS_TT_sym_RZ_sym_prune
+```
+
+To keep the runner alive after disconnecting the terminal, redirect its launcher
+output **outside** the results directory (which must initially be empty):
+
+```bash
+nohup python3 -u solver/tools/run_rzone_baseline.py > result/baselinev2.runner.log 2>&1 < /dev/null &
+```
+
+The script waits for each process directly; it requires no model calls or AI
+monitoring. Follow `result/baselinev2/runner.log` for case transitions and the
+individual `*.log` files for solver progress. Each case produces its exact cfg,
+solver log, GNU time report (CPU time and peak RSS), status JSON, and SGF.
+RZone-enabled cases save `.rz`; TT-enabled cases save `.tt`. Complete solves
+also produce an independent checker log/time report.
+`summary.csv` and `summary.json` update after each stage, separating solver wall
+time (including initialization and output), reported search time, and checker
+wall time. `metadata.json` records suite status, timestamps, total wall time,
+model/binary hashes, and source provenance; a source archive and working-tree
+diff are saved too. `SIGINT`/`SIGTERM` during solving or checking stops the child
+process group and records the interruption. The runner does not resume partial runs.
+
+For a later trimming comparison, reuse the **same binaries** and choose a new
+output directory; keep targets, modes, node limit and model identical:
+
+```bash
+python3 solver/tools/run_rzone_baseline.py --trimming \
+  --binaries-dir result/baselinev2/bin --output result/trimming_comparison
+```
 
 ## Defaults and configuration
 
@@ -48,7 +117,9 @@ solver/solver2048 --config solver/target16.cfg
 The cfg format is strict `key=value`, with blank lines, full-line comments, and
 inline `# comments` supported. Unknown, duplicate, missing, or ill-typed keys
 are errors. `rzone_active_pruning` is a backward-compatible optional key and
-defaults to `false` when omitted. Relative
+defaults to `false` when omitted. `rzone_trimming` and
+`rzone_full_board_placement_fallback` are also optional, both defaulting to `true`
+to preserve the existing behavior. Relative
 model and SGF paths use the process working directory, matching the referenced
 `game-solver` behavior. The complete supported file is:
 
@@ -67,6 +138,8 @@ use_rzone_symmetry=true
 rzone_max_cells=16
 rzone_shadow_exact_check=false
 rzone_active_pruning=false
+rzone_trimming=true
+rzone_full_board_placement_fallback=true
 load_rz=false
 save_rz=true
 rz_path=result/RZ/8_RZ.rz
@@ -160,6 +233,28 @@ enabled requires a different compatible `--tt-file`. For a one-off mechanism
 baseline that must not read or overwrite a snapshot, use both `--no-load-tt`
 and `--no-save-tt`.
 
+### RZone trimming (semantics v3)
+
+FixedSlide construction now follows `../RZimproved.txt`: starting with the
+derived preimage, try removing each constrained cell that did not participate
+in a merge in the original slide, including required empty cells. Restart after
+each successful removal. Every trial universally checks all non-winning
+completions outside the candidate mask, including previously removed cells.
+The slide must be legal and must either win anywhere or match its validated
+child pattern. No verification budget, value variants, or alternative slide
+search is used. The cell-count limit is applied after trimming.
+
+Generation and snapshot loading summarize each independent line's completions;
+the standalone checker independently enumerates and combines reachable line
+outcomes. Both verify the whole-board terminal-or-child condition, including
+cross-line interactions. Lookup and active pruning still use exact masked
+comparison without replay. Certificates remain immutable.
+
+New `.rz` snapshots use semantics version 3 with the existing record layout;
+versions 1 and 2 remain readable and retain their stricter FixedSlide checks.
+Old readers reject version 3. Logs and SGFs report trim attempts, removed cells,
+and successful lift constructions whose masks were reduced (before interning).
+
 ### First RZone implementation
 
 `rzone_mode=generate` derives immutable Player-Win certificates during normal
@@ -176,6 +271,18 @@ Environment universal-placement step whose relevant cells are all non-empty.
 The last condition guarantees every legal 2/4 placement stays outside the
 zone. `rzone_max_cells` bounds accepted certificates; certificate depth is
 recorded for diagnostics and tie-breaking but does not limit derivation.
+
+`rzone_trimming=false` skips trimming when generating FixedSlide certificates,
+retaining the original slide preimage mask. `rzone_full_board_placement_fallback=false`
+disables generation of full-board Environment certificates when universal placement
+lifting fails. These switches are independent of active pruning and apply in both
+`generate` and `lookup` modes. They have no effect when RZone is disabled.
+Both settings are recorded in the console output and SGF root metadata.
+
+The switches control new certificate generation; valid certificates loaded from
+`.rz` files or reused between batch openings remain usable. For controlled
+comparisons, use `load_tt=false`, `load_rz=false`, and a fresh single-opening solve
+for each setting combination.
 
 `rzone_lookup_policy=full_scan` preserves the original policy: scan every
 indexed mask and choose the globally smallest-cell certificate, then shortest

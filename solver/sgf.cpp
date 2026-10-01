@@ -59,6 +59,10 @@ std::string nodeComment(const TraceNode& node, const SgfMetadata* metadata)
                 << (metadata->rzone_shadow_exact_check ? "enabled" : "disabled")
                 << '\n' << "rzone_active_pruning = "
                 << (metadata->rzone_active_pruning ? "enabled" : "disabled")
+                << '\n' << "rzone_trimming = "
+                << (metadata->rzone_trimming ? "enabled" : "disabled")
+                << '\n' << "rzone_full_board_placement_fallback = "
+                << (metadata->rzone_full_board_placement_fallback ? "enabled" : "disabled")
                 << '\n' << "persistent_tt_load = "
                 << (metadata->load_tt ? "enabled" : "disabled")
                 << '\n' << "persistent_tt_save = "
@@ -107,6 +111,9 @@ std::string nodeComment(const TraceNode& node, const SgfMetadata* metadata)
                 << metadata->statistics.rzone.slide_lift_attempts
                 << '\n' << "rzone_slide_lift_successes = "
                 << metadata->statistics.rzone.slide_lift_successes
+                << '\n' << "rzone_trim_attempts = " << metadata->statistics.rzone.trim_attempts
+                << '\n' << "rzone_trim_cells_removed = " << metadata->statistics.rzone.trim_cells_removed
+                << '\n' << "rzone_trimmed_certificates = " << metadata->statistics.rzone.trimmed_certificates
                 << '\n' << "rzone_full_board_placement_certificates = "
                 << metadata->statistics.rzone.full_board_placement_certificates
                 << '\n' << "rzone_placement_lift_attempts = "
