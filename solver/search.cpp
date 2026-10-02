@@ -118,10 +118,15 @@ void Solver::adoptPersistentProofs(Solver& completed)
     rzone_table_.patterns_ = std::move(completed.rzone_table_.patterns_);
     rzone_table_.masks_by_phase_ =
         std::move(completed.rzone_table_.masks_by_phase_);
+    rzone_table_.radix_nodes_ = std::move(completed.rzone_table_.radix_nodes_);
+    rzone_table_.radix_roots_ = completed.rzone_table_.radix_roots_;
+    completed.rzone_table_.radix_roots_ = {};
     rzone_table_.statistics_ = {};
     rzone_table_.statistics_.loaded_certificates =
         rzone_table_.certificates_.size();
     rzone_table_.statistics_.masks_indexed = rzone_table_.patterns_.size();
+    rzone_table_.statistics_.radix_nodes = rzone_table_.radix_nodes_.empty()
+        ? 0 : rzone_table_.radix_nodes_.size() - 1;
 }
 
 SearchResult Solver::solve()

@@ -127,6 +127,10 @@ std::string nodeComment(const TraceNode& node, const SgfMetadata* metadata)
                 << metadata->statistics.rzone.lookup_masks_tested
                 << '\n' << "rzone_lookup_candidates = "
                 << metadata->statistics.rzone.lookup_candidates
+                << '\n' << "rzone_radix_nodes = " << metadata->statistics.rzone.radix_nodes
+                << '\n' << "rzone_radix_node_visits = " << metadata->statistics.rzone.radix_node_visits
+                << '\n' << "rzone_radix_prefix_rejects = " << metadata->statistics.rzone.radix_prefix_rejects
+                << '\n' << "rzone_radix_bound_prunes = " << metadata->statistics.rzone.radix_bound_prunes
                 << '\n' << "rzone_pattern_matches = "
                 << metadata->statistics.rzone.pattern_matches
                 << '\n' << "rzone_lookup_early_exits = "

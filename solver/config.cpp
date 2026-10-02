@@ -89,8 +89,9 @@ RZoneLookupPolicy parseRZoneLookupPolicy(std::string value,
     });
     if (value == "full_scan") return RZoneLookupPolicy::FullScan;
     if (value == "smallest_first") return RZoneLookupPolicy::SmallestFirst;
+    if (value == "radix_tree") return RZoneLookupPolicy::RadixTree;
     throw configError(
-        path, line, "rzone_lookup_policy requires full_scan or smallest_first");
+        path, line, "rzone_lookup_policy requires full_scan, smallest_first, or radix_tree");
 }
 
 std::array<unsigned, 16> parseOpening(const std::string& value,

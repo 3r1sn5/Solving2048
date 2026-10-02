@@ -686,6 +686,8 @@ RzFileSummary RzFile::load(const std::filesystem::path& path, RZoneTable& table)
         for (auto& masks : phase_masks) masks.clear();
     }
     table.patterns_.clear();
+    table.radix_nodes_.clear();
+    table.radix_roots_ = {};
     table.certificates_.clear();
     table.statistics_ = {};
     for (const RZoneCertificate& certificate : certificates) {
@@ -693,6 +695,7 @@ RzFileSummary RzFile::load(const std::filesystem::path& path, RZoneTable& table)
         const unsigned cells = RZoneTable::countCells(certificate.mask);
         if (cells > table.max_cells_) continue;
         table.patternIds(certificate).push_back(certificate.id);
+        table.indexRadixCertificate(certificate);
     }
     table.statistics_.loaded_certificates = certificates.size();
     return {record_count, checksum, file_size};

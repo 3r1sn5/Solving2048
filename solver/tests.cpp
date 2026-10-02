@@ -939,6 +939,13 @@ void testSolverConfigParsingAndValidation()
 
     std::string invalid_rzone_policy = validConfigText();
     const std::string valid_policy = "rzone_lookup_policy=smallest_first";
+    std::string radix_config_text = validConfigText();
+    radix_config_text.replace(radix_config_text.find(valid_policy), valid_policy.size(),
+                              "rzone_lookup_policy=radix_tree");
+    TemporaryConfigFile radix_config(radix_config_text);
+    check(solver2048::loadSolverConfig(radix_config.path).rzone_lookup_policy ==
+              RZoneLookupPolicy::RadixTree,
+          "radix_tree lookup policy must parse from cfg");
     invalid_rzone_policy.replace(
         invalid_rzone_policy.find(valid_policy), valid_policy.size(),
         "rzone_lookup_policy=all_matches");
@@ -1585,7 +1592,8 @@ void testPersistentRzRoundTripAndMaxCellIndexing()
 void testRZonePhaseIndexesAndRelocation()
 {
     MechanicsGame game;
-    for (const auto policy : {RZoneLookupPolicy::FullScan, RZoneLookupPolicy::SmallestFirst}) {
+    for (const auto policy : {RZoneLookupPolicy::FullScan, RZoneLookupPolicy::SmallestFirst,
+                              RZoneLookupPolicy::RadixTree}) {
         for (const bool symmetry : {false, true}) {
             RZoneTable source(game, 16, 16, policy, symmetry, false);
             const Board terminal = tiles({{0, 16}});
@@ -1597,10 +1605,11 @@ void testRZonePhaseIndexesAndRelocation()
             const auto player = source.createTerminal(terminal, Phase::Player);
             const auto hit = source.lookup(terminal, Phase::Player);
             const unsigned transforms = symmetry ? 8 : 1;
+            const bool radix = policy == RZoneLookupPolicy::RadixTree;
             check(player && hit && hit->id == *player && hit->transform == 0 &&
                       source.statistics().masks_indexed == 1 &&
-                      source.statistics().lookup_masks_tested == transforms &&
-                      source.statistics().lookup_candidates == (symmetry ? 2 : 1),
+                      source.statistics().lookup_masks_tested == (radix ? 0 : transforms) &&
+                      source.statistics().lookup_candidates == (!radix && symmetry ? 2 : 1),
                   "shared masks must count once and exclude opposite-phase candidates");
 
             std::vector<Board> queries = {Board{}, terminal, tiles({{0, 32}})};
@@ -1635,6 +1644,15 @@ void testRZonePhaseIndexesAndRelocation()
             }
             check(source.statistics().masks_indexed > 32,
                   "growth fixture must exercise many distinct masks");
+            std::uint64_t seed = 0xadc83b19;
+            for (int sample = 0; sample < 256; ++sample) {
+                std::uint64_t raw = 0;
+                for (unsigned position = 0; position < 16; ++position) {
+                    seed = seed * 6364136223846793005ull + 1442695040888963407ull;
+                    raw |= ((seed >> 32) % 4) << (position * 4);
+                }
+                queries.push_back(Board{raw});
+            }
 
             // Independent oracle scans immutable certificates, with no use of
             // either lookup index, and checks the complete deterministic rank.
@@ -1690,7 +1708,7 @@ void testRZoneIndexCrossOpeningHandoff()
     MechanicsGame next_game(solver2048::transformBoard(opening, 1));
     SolverOptions options{16, 0, 0, true, true};
     options.rzone_mode = RZoneMode::Lookup;
-    options.rzone_lookup_policy = RZoneLookupPolicy::SmallestFirst;
+    options.rzone_lookup_policy = RZoneLookupPolicy::RadixTree;
     options.use_rzone_symmetry = true;
     Solver next(next_game, options);
     RzFileSummary expected;
@@ -2456,6 +2474,38 @@ void testRealGameApiAndThreeNodeSearch()
                   symmetry_rzone_result.statistics.rzone.lookups * 8,
           "target-8 symmetry RZone lookup counters are incomplete");
     checkTraceIdsAreDfsDiscoveryOrder(*symmetry_rzone_result.root);
+
+    for (const bool active : {false, true}) {
+        SolverOptions hash_options = symmetry_rzone_options;
+        hash_options.rzone_active_pruning = active;
+        Solver hash_solver(game, hash_options);
+        const auto hash_result = hash_solver.solve();
+        SolverOptions radix_options = hash_options;
+        radix_options.rzone_lookup_policy = RZoneLookupPolicy::RadixTree;
+        Solver radix_solver(game, radix_options);
+        const auto radix_result = radix_solver.solve();
+        check(radix_result.outcome == hash_result.outcome &&
+                  radix_result.root_action == hash_result.root_action &&
+                  radix_result.statistics.combinedNodes() == hash_result.statistics.combinedNodes() &&
+                  radix_result.statistics.rzone.hits() == hash_result.statistics.rzone.hits() &&
+                  RzFile::summarize(radix_solver).payload_checksum ==
+                      RzFile::summarize(hash_solver).payload_checksum &&
+                  radix_result.statistics.rzone.lookup_masks_tested == 0 &&
+                  radix_result.statistics.rzone.radix_node_visits != 0,
+              "radix lookup must preserve complete target-8 search and immutable proof payload");
+        std::function<void(const TraceNode&, const TraceNode&)> compare =
+            [&](const TraceNode& lhs, const TraceNode& rhs) {
+                check(lhs.outcome == rhs.outcome && lhs.solved_by == rhs.solved_by &&
+                          lhs.rzone_certificate_id == rhs.rzone_certificate_id &&
+                          lhs.rzone_transform == rhs.rzone_transform &&
+                          lhs.children.size() == rhs.children.size(),
+                      "radix lookup must return the same certificate and transform at every node");
+                for (std::size_t i = 0; i < lhs.children.size(); ++i) {
+                    compare(*lhs.children[i], *rhs.children[i]);
+                }
+            };
+        compare(*radix_result.root, *hash_result.root);
+    }
 
     SolverOptions active_rzone_options = symmetry_rzone_options;
     active_rzone_options.rzone_active_pruning = true;

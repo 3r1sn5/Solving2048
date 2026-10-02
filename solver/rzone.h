@@ -32,6 +32,7 @@ enum class RZoneStepKind {
 enum class RZoneLookupPolicy {
     FullScan,
     SmallestFirst,
+    RadixTree,
 };
 
 using RZoneCertificateId = std::uint32_t;
@@ -79,6 +80,10 @@ struct RZoneStatistics {
     std::uint64_t lookup_candidates = 0;
     std::uint64_t pattern_matches = 0;
     std::uint64_t lookup_early_exits = 0;
+    std::uint64_t radix_nodes = 0;
+    std::uint64_t radix_node_visits = 0;
+    std::uint64_t radix_prefix_rejects = 0;
+    std::uint64_t radix_bound_prunes = 0;
     std::uint64_t player_hits = 0;
     std::uint64_t environment_hits = 0;
     std::uint64_t exact_orientation_hits = 0;
@@ -167,6 +172,29 @@ private:
         const PatternBucket* bucket = nullptr;
     };
 
+    // Path-compressed trie over 16 tile ranks plus a distinct wildcard symbol.
+    // Prefixes are checked with a single masked comparison. Leaves retain the
+    // best certificate for their exact (mask, board) key; all proofs still live
+    // in certificates_ and the publication/deduplication index.
+    using RadixNodeId = std::uint32_t;
+    struct RadixNode {
+        std::uint64_t prefix_mask = 0;
+        std::uint64_t prefix_value = 0;
+        RZoneCertificateId key = 0;
+        RZoneCertificateId best = 0;
+        unsigned best_depth = 0;
+        std::array<RadixNodeId, 17> children{};
+        unsigned split = 16;
+    };
+
+    void indexRadixCertificate(const RZoneCertificate& certificate);
+    RadixNodeId makeRadixNode(const RZoneCertificate& certificate, unsigned split);
+    RadixNodeId insertRadixNode(RadixNodeId node, const RZoneCertificate& certificate);
+    void searchRadixNode(RadixNodeId node, Board board, std::uint8_t transform,
+                         const RZoneCertificate*& best, std::uint8_t& best_transform);
+    std::optional<RZoneMatch> lookupRadix(
+        const std::array<Board, 8>& candidates, unsigned transform_count, Phase phase);
+
     static std::size_t phaseIndex(Phase phase);
     std::vector<RZoneCertificateId>& patternIds(const RZoneCertificate& certificate);
     std::optional<RZoneCertificateId> publish(RZoneCertificate certificate);
@@ -209,6 +237,10 @@ private:
     // no buckets are erased while their index entries remain in use.
     std::unordered_map<std::uint16_t, std::array<PatternBucket, 2>> patterns_;
     std::array<std::array<std::vector<MaskIndexEntry>, 17>, 2> masks_by_phase_;
+    // Integer links survive vector growth, snapshot rebuilding, and handoff.
+    // Zero is the null link; the sentinel is allocated only in radix mode.
+    std::vector<RadixNode> radix_nodes_;
+    std::array<std::array<RadixNodeId, 17>, 2> radix_roots_{};
     RZoneStatistics statistics_;
 };
 

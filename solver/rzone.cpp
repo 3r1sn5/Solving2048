@@ -7,6 +7,7 @@
 #include <array>
 #include <limits>
 #include <stdexcept>
+#include <tuple>
 
 namespace solver2048 {
 namespace {
@@ -172,8 +173,134 @@ std::optional<RZoneCertificateId> RZoneTable::publish(RZoneCertificate certifica
     certificate.id = static_cast<RZoneCertificateId>(certificates_.size() + 1);
     certificates_.push_back(certificate);
     ids.push_back(certificate.id);
+    indexRadixCertificate(certificate);
     ++statistics_.patterns_stored;
     return certificate.id;
+}
+
+RZoneTable::RadixNodeId RZoneTable::makeRadixNode(
+    const RZoneCertificate& certificate, unsigned split)
+{
+    if (radix_nodes_.size() >= std::numeric_limits<RadixNodeId>::max()) {
+        throw std::overflow_error("RZone radix index exceeds its node ID space");
+    }
+    RadixNode node;
+    node.split = split;
+    node.key = node.best = certificate.id;
+    node.best_depth = certificate.depth;
+    node.prefix_mask = expandNibbleMask(
+        static_cast<std::uint16_t>(certificate.mask & ((1u << split) - 1)));
+    node.prefix_value = certificate.masked_board & node.prefix_mask;
+    const auto id = static_cast<RadixNodeId>(radix_nodes_.size());
+    radix_nodes_.push_back(node);
+    ++statistics_.radix_nodes;
+    return id;
+}
+
+RZoneTable::RadixNodeId RZoneTable::insertRadixNode(
+    RadixNodeId id, const RZoneCertificate& certificate)
+{
+    if (!id) return makeRadixNode(certificate, 16);
+    const RZoneCertificate& key = *find(radix_nodes_[id].key);
+    const unsigned mask_difference = key.mask ^ certificate.mask;
+    const std::uint64_t value_difference = (key.masked_board ^ certificate.masked_board) &
+        expandNibbleMask(key.mask & certificate.mask);
+    const unsigned first_difference = std::min(
+        mask_difference ? static_cast<unsigned>(__builtin_ctz(mask_difference)) : 16u,
+        value_difference ? static_cast<unsigned>(__builtin_ctzll(value_difference) / 4) : 16u);
+    auto symbol = [](const RZoneCertificate& value, unsigned position) {
+        return (value.mask & (1u << position))
+            ? cellRank(Board{value.masked_board}, position) : 16u;
+    };
+    if (first_difference < radix_nodes_[id].split) {
+        const auto parent = makeRadixNode(certificate, first_difference);
+        const auto leaf = makeRadixNode(certificate, 16);
+        // Allocations can relocate the vector: retain only IDs across them.
+        radix_nodes_[parent].children[symbol(key, first_difference)] = id;
+        radix_nodes_[parent].children[symbol(certificate, first_difference)] = leaf;
+        if (std::tie(radix_nodes_[id].best_depth, radix_nodes_[id].best) <
+            std::tie(radix_nodes_[parent].best_depth, radix_nodes_[parent].best)) {
+            radix_nodes_[parent].best_depth = radix_nodes_[id].best_depth;
+            radix_nodes_[parent].best = radix_nodes_[id].best;
+        }
+        return parent;
+    }
+    if (radix_nodes_[id].split < 16) {
+        const auto branch = symbol(certificate, radix_nodes_[id].split);
+        const auto child = insertRadixNode(radix_nodes_[id].children[branch], certificate);
+        radix_nodes_[id].children[branch] = child;
+    }
+    if (std::tie(certificate.depth, certificate.id) <
+        std::tie(radix_nodes_[id].best_depth, radix_nodes_[id].best)) {
+        radix_nodes_[id].best_depth = certificate.depth;
+        radix_nodes_[id].best = certificate.id;
+    }
+    return id;
+}
+
+void RZoneTable::indexRadixCertificate(const RZoneCertificate& certificate)
+{
+    if (lookup_policy_ != RZoneLookupPolicy::RadixTree) return;
+    if (radix_nodes_.empty()) radix_nodes_.emplace_back();
+    auto& root = radix_roots_[phaseIndex(certificate.phase)][countCells(certificate.mask)];
+    root = insertRadixNode(root, certificate);
+}
+
+void RZoneTable::searchRadixNode(
+    RadixNodeId id, Board board, std::uint8_t transform,
+    const RZoneCertificate*& best, std::uint8_t& best_transform)
+{
+    if (!id) return;
+    ++statistics_.radix_node_visits;
+    const RadixNode& node = radix_nodes_[id];
+    // The subtree's minimum rank is a lower bound, even if its certificate
+    // doesn't match this board. Equal/worse bounds cannot improve the answer.
+    if (best && std::tie(node.best_depth, node.best, transform) >=
+                    std::tie(best->depth, best->id, best_transform)) {
+        ++statistics_.radix_bound_prunes;
+        return;
+    }
+    if ((board.raw & node.prefix_mask) != node.prefix_value) {
+        ++statistics_.radix_prefix_rejects;
+        return;
+    }
+    if (node.split == 16) {
+        // A leaf's prefix is the entire pattern, including constrained zeros.
+        ++statistics_.lookup_candidates;
+        ++statistics_.pattern_matches;
+        best = find(node.best);
+        best_transform = transform;
+        return;
+    }
+    auto first = node.children[cellRank(board, node.split)];
+    auto second = node.children[16]; // Wildcard is distinct from empty (rank 0).
+    if (second && (!first ||
+        std::tie(radix_nodes_[second].best_depth, radix_nodes_[second].best) <
+        std::tie(radix_nodes_[first].best_depth, radix_nodes_[first].best))) {
+        std::swap(first, second);
+    }
+    searchRadixNode(first, board, transform, best, best_transform);
+    searchRadixNode(second, board, transform, best, best_transform);
+}
+
+std::optional<RZoneMatch> RZoneTable::lookupRadix(
+    const std::array<Board, 8>& candidates, unsigned transform_count, Phase phase)
+{
+    const auto& roots = radix_roots_[phaseIndex(phase)];
+    for (unsigned cells = 1; cells <= max_cells_; ++cells) {
+        if (!roots[cells]) continue;
+        const RZoneCertificate* best = nullptr;
+        std::uint8_t best_transform = 0;
+        for (unsigned transform = 0; transform < transform_count; ++transform) {
+            searchRadixNode(roots[cells], candidates[transform],
+                            static_cast<std::uint8_t>(transform), best, best_transform);
+        }
+        if (best) {
+            ++statistics_.lookup_early_exits;
+            return recordLookupHit(best, phase, best_transform);
+        }
+    }
+    return std::nullopt;
 }
 
 const RZoneCertificate* RZoneTable::find(RZoneCertificateId id) const
@@ -435,6 +562,9 @@ std::optional<RZoneMatch> RZoneTable::lookup(Board board, Phase phase)
             : transformBoard(board, static_cast<std::uint8_t>(transform));
     }
     statistics_.lookup_transforms_tested += transform_count;
+    if (lookup_policy_ == RZoneLookupPolicy::RadixTree) {
+        return lookupRadix(candidates, transform_count, phase);
+    }
     if (lookup_policy_ == RZoneLookupPolicy::SmallestFirst) {
         return lookupSmallestFirst(candidates, transform_count, phase);
     }
@@ -631,6 +761,7 @@ const char* rzoneLookupPolicyName(RZoneLookupPolicy policy)
     switch (policy) {
         case RZoneLookupPolicy::FullScan: return "full_scan";
         case RZoneLookupPolicy::SmallestFirst: return "smallest_first";
+        case RZoneLookupPolicy::RadixTree: return "radix_tree";
     }
     return "full_scan";
 }

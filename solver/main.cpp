@@ -78,8 +78,9 @@ RZoneLookupPolicy parseRZoneLookupPolicyOption(const std::string& text)
 {
     if (text == "full_scan") return RZoneLookupPolicy::FullScan;
     if (text == "smallest_first") return RZoneLookupPolicy::SmallestFirst;
+    if (text == "radix_tree") return RZoneLookupPolicy::RadixTree;
     throw std::invalid_argument(
-        "--rzone-lookup-policy requires full_scan or smallest_first");
+        "--rzone-lookup-policy requires full_scan, smallest_first, or radix_tree");
 }
 
 CommandLine parseCommandLine(int argc, char** argv)
@@ -294,7 +295,7 @@ void printHelp(const char* program)
         << "  --save-tt / --no-save-tt  Save or skip the merged persistent TT snapshot\n"
         << "  --tt-file PATH          Override persistent TT file path\n"
         << "  --rzone-mode MODE      disabled, generate, or lookup\n"
-        << "  --rzone-lookup-policy POLICY  full_scan or smallest_first\n"
+        << "  --rzone-lookup-policy POLICY  full_scan, smallest_first, or radix_tree\n"
         << "  --rzone-symmetry / --no-rzone-symmetry  Search all 8 D4 orientations\n"
         << "  --rzone-max-cells N    Maximum cells in an RZone pattern (1..16)\n"
         << "  --load-rz / --no-load-rz  Load or skip the persistent RZone snapshot\n"
@@ -903,6 +904,10 @@ int main(int argc, char** argv)
                       << "RZone unique masks: " << rzone.masks_indexed << '\n'
                       << "RZone masks tested: " << rzone.lookup_masks_tested << '\n'
                       << "RZone lookup candidates: " << rzone.lookup_candidates << '\n'
+                      << "RZone radix nodes: " << rzone.radix_nodes << '\n'
+                      << "RZone radix node visits: " << rzone.radix_node_visits << '\n'
+                      << "RZone radix prefix rejects: " << rzone.radix_prefix_rejects << '\n'
+                      << "RZone radix bound prunes: " << rzone.radix_bound_prunes << '\n'
                       << "RZone trim attempts: " << rzone.trim_attempts << '\n'
                       << "RZone trim cells removed: " << rzone.trim_cells_removed << '\n'
                       << "RZone trimmed certificates: " << rzone.trimmed_certificates << '\n'

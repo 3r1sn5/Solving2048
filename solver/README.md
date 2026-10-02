@@ -301,6 +301,29 @@ Certificate IDs, match tie-breaking, and the persistent format are unchanged.
 `RZone unique masks` still counts distinct masks across both phases once;
 mask-test and candidate counters now count only work in the queried phase.
 
+`rzone_lookup_policy=radix_tree` (or `--rzone-lookup-policy radix_tree`) selects
+a path-compressed radix index instead of enumerating masks. Keys contain sixteen
+tile-rank symbols and a distinct wildcard symbol, so a constrained empty cell
+does not match an occupied cell. Separate roots cover each phase and cell count;
+queries follow both the exact-symbol and wildcard edges. Compressed prefixes
+are checked with a masked comparison, and subtree depth/ID bounds skip branches
+that cannot improve the deterministic cells/depth/ID/transform result.
+
+All certificates remain immutable and retain their original IDs. The hash
+publication index is retained for certificate interning; only radix mode builds
+the additional tree. Snapshot loading rebuilds it, and batch handoff moves it
+using integer node links. The `.rz` format and proof checker are unchanged.
+Radix logs/SGFs report index nodes, visited nodes, prefix rejections, and rank-bound
+prunes; `lookup_masks_tested` is zero in this mode. Candidate and pattern-match
+counts measure visited matching leaves, not all certificates in a hash bucket.
+The existing `smallest_first` policy remains available as the benchmark control.
+
+Use `solver/tools/run_radix_experiment.py` to run a fresh-cache experiment with
+an explicit binary, model, target, policy, and new output directory. It records
+search wall time separately from process wall time, `/usr/bin/time` resource
+usage, binary/model hashes, and TT/RZ/normalized-SGF hashes. Pass `--checker` to
+independently verify the resulting proof. `--node-limit 0` is a full solve.
+
 `use_rzone_symmetry=true` (or `--rzone-symmetry`) computes all eight D4 versions
 of the candidate board and searches the existing one-copy index. The returned
 transform maps the current board into the stored certificate orientation;
