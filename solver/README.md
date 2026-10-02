@@ -324,6 +324,32 @@ search wall time separately from process wall time, `/usr/bin/time` resource
 usage, binary/model hashes, and TT/RZ/normalized-SGF hashes. Pass `--checker` to
 independently verify the resulting proof. `--node-limit 0` is a full solve.
 
+Measured on 2026-10-02 against the previously optimized `smallest_first` hash
+lookup (`d6ae3e1`), using `4x6patt`, opening `2@0,2@1`, empty initial tables,
+TT/RZone symmetry, trimming, active pruning, and no node limit:
+
+| Target | Hash search wall time | Radix search wall time | Speedup | Time reduction |
+| --- | ---: | ---: | ---: | ---: |
+| 8 (one smoke run each) | 0.016097 s | 0.009141 s | 1.76x | 43.2% |
+| 16 (median of three each) | 6.633044 s | 3.574828 s | 1.86x | 46.1% |
+| 32 (one complete run each) | 11584.708759 s | 4409.460449 s | 2.63x | 61.9% |
+
+Both target-32 runs returned WIN after 46,288,089 visited nodes. Peak process
+RSS increased from 22.26 GiB to 28.66 GiB (+28.8%). Process wall time including
+startup/output was 11763.34 s versus 4567.26 s; the table reports search only.
+The two single-threaded target-32 processes overlapped on the same 32-physical-core
+host; small-target runs alternated policies. These are measurements of this
+opening/model, not a guarantee for other openings or targets.
+
+All paired runs produced byte-identical TT/RZ files and identical SGF hashes
+after excluding output paths, timing, lookup policy, and index-only counters.
+All 28 solver tests and focused AddressSanitizer tests passed (LeakSanitizer
+disabled under ptrace). Targets 8/16 and a two-opening target-8 batch passed the
+independent proof checker. Target 32 was validated against the complete hash
+control's proof/trace output, without a separate proof-checker run. Local raw
+logs, configs, binary/model hashes, and `summary.json`/`comparison.csv` are in
+`result/radix_lookup_20261002` in the original workspace.
+
 `use_rzone_symmetry=true` (or `--rzone-symmetry`) computes all eight D4 versions
 of the candidate board and searches the existing one-copy index. The returned
 transform maps the current board into the stored certificate orientation;
