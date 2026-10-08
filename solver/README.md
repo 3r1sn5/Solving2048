@@ -381,6 +381,12 @@ evaluation. Direction opcode (`up`, `right`, `down`, `left`) is the stable
 tie-break. This heuristic changes DFS order only; Win/Loss still comes solely
 from the complete AND-OR proof.
 
+The solver supports `network=4x6patt` and `network=8x6patt`. Set `model_path`
+to the matching weights (`models/4x6patt.w` or `models/8x6patt.w`); changing
+only the weight file does not change the evaluator's feature layout. One
+process uses one network/model pair. The experiment runner accepts
+`--network 8x6patt` and selects `models/8x6patt.w` unless `--model` is supplied.
+
 With `--tt-symmetry`, both store and lookup compute the minimum raw board among
 all eight D4 versions and perform one hash-table operation using that canonical
 key. Actions are stored in canonical orientation and mapped back on a hit, so

@@ -74,7 +74,7 @@ def configuration(args, target, mode, prefix):
         'rzone_trimming': boolean(args.trimming),
         'rzone_full_board_placement_fallback': 'true',
         'load_rz': 'false', 'save_rz': boolean(rz), 'rz_path': str(prefix) + '.rz',
-        'opening': '2@0,2@1', 'network': '4x6patt', 'model_path': str(args.model),
+        'opening': '2@0,2@1', 'network': args.network, 'model_path': str(args.model),
         'sgf_path': str(prefix) + '.sgf',
     }
 
@@ -192,12 +192,15 @@ def main():
     parser.add_argument('--node-limit', type=int, default=100000000,
                         help='per-case visited-node limit (default: 100000000); 0 means unlimited')
     parser.add_argument('--progress-interval', type=int, default=1000000)
-    parser.add_argument('--model', type=Path, default=ROOT / 'models/4x6patt.w')
+    parser.add_argument('--network', choices=['4x6patt', '8x6patt'], default='4x6patt')
+    parser.add_argument('--model', type=Path,
+                        help='model path (default: models/<network>.w)')
     parser.add_argument('--binaries-dir', type=Path, help='copy existing solver2048/proof_checker; skip build')
     parser.add_argument('--trimming', action='store_true', help='enable trimming for a later comparison run')
     parser.add_argument('--dry-run', action='store_true', help='print plan without building or running')
     args = parser.parse_args()
-    args.output, args.model = args.output.resolve(), args.model.resolve()
+    args.output = args.output.resolve()
+    args.model = (args.model or ROOT / 'models' / (args.network + '.w')).resolve()
     if args.binaries_dir:
         args.binaries_dir = args.binaries_dir.resolve()
     if (any(t < 4 or t > 32768 or t & (t - 1) for t in args.targets) or
@@ -235,6 +238,7 @@ def main():
                 'targets': args.targets, 'modes': args.modes, 'case_count': len(cases),
                 'node_limit': args.node_limit, 'progress_interval': args.progress_interval,
                 'trimming': args.trimming, 'full_board_fallback': True,
+                'network': args.network,
                 'execution': 'sequential, one fresh process and empty TT/RZ per case'}
     started = time.monotonic()
 

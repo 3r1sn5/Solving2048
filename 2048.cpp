@@ -2626,10 +2626,12 @@ utils::options parse(int argc, const char* argv[]) {
 
 namespace solver_api {
 
+static bool use8x6patt = false;
+
 void initializeNetwork(const std::string& network, const std::string& model_path)
 {
-	if (network != "4x6patt")
-		throw std::invalid_argument("the first solver API supports only the 4x6patt network");
+	if (network != "4x6patt" && network != "8x6patt")
+		throw std::invalid_argument("the solver API supports only 4x6patt and 8x6patt networks");
 	static bool initialized = false;
 	if (initialized)
 		throw std::logic_error("the process-wide N-tuple network is already initialized");
@@ -2644,6 +2646,7 @@ void initializeNetwork(const std::string& network, const std::string& model_path
 	utils::make_network(options["make"]);
 	if (feature::feats().empty())
 		throw std::runtime_error("failed to bind N-tuple features for: " + network);
+	use8x6patt = network == "8x6patt";
 	initialized = true;
 }
 
@@ -2658,6 +2661,10 @@ int slide(RawBoard raw, unsigned opcode, RawBoard& afterstate)
 
 double evaluateAfterstate(RawBoard raw)
 {
+	if (use8x6patt) {
+		using evaluator = method::isomorphic<weight::structure>::idx8x6patt;
+		return evaluator::estimate(board(raw), feature::feats());
+	}
 	using evaluator = method::isomorphic<weight::structure>::idx4x6patt;
 	return evaluator::estimate(board(raw), feature::feats());
 }

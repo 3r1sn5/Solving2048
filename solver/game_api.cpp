@@ -84,8 +84,8 @@ GameApi::GameApi(std::string network,
                  const std::array<unsigned, 16>& opening)
     : network_(std::move(network)), model_path_(std::move(model_path)), opening_(boardFromTiles(opening))
 {
-    if (network_ != "4x6patt") {
-        throw std::invalid_argument("the first solver version supports only the 4x6patt network");
+    if (network_ != "4x6patt" && network_ != "8x6patt") {
+        throw std::invalid_argument("the solver supports only 4x6patt and 8x6patt networks");
     }
     if (!std::filesystem::is_regular_file(model_path_)) {
         throw std::runtime_error("N-tuple model not found: " + model_path_);
