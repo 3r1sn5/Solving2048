@@ -624,3 +624,33 @@ make solver-test
 
 The suite includes the complete unlimited target-8 search with TT enabled. The
 far larger unlimited raw DFS baseline (`--no-tt`) remains an opt-in benchmark.
+
+### Continuing a batch from an existing proof sequence
+
+`--seed-sequence PATH` loads that manifest's TT and optional RZ snapshot once,
+then searches only the new openings passed via `--openings-file` or `--opening`.
+The output directory must have no existing batch artifacts. Seed files are
+read-only inputs, and all seed SGFs are prepended to the final proof sequence.
+The first new opening records the loaded proof counts and persistent sources;
+subsequent openings adopt the accumulated tables as in an ordinary batch.
+
+Use a complete, previously verified seed sequence. Its target and TT symmetry
+must match the new batch, and its RZ presence must match the configured RZ mode.
+RZ seed bindings must use the current writer semantics (v3); legacy snapshots
+remain usable in single runs but are not migrated by this continuation option.
+The loaded snapshots must match the final seed SGF's artifact bindings. An
+opening already present in the seed is rejected; list only the remaining ones.
+`--verify` checks the entire combined sequence, including all seed SGFs, against
+the final snapshots. Seed compatibility checks alone do not reverify its proof.
+Without `--seed-sequence`, batch still starts from empty tables; single-run
+`load_tt`/`load_rz` settings do not select a batch seed.
+
+Example:
+
+```bash
+solver/solver2048 --config run.cfg --seed-sequence seed_sequence.txt \
+  --openings-file remaining.txt --output-dir result/continued --verify
+```
+
+Run `python3 solver/tools/test_seeded_batch.py` after `make solver` to check
+continuation, proof lineage, immutable inputs, and incompatible seed rejection.

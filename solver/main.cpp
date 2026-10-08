@@ -32,6 +32,7 @@ struct CommandLine {
     std::vector<std::array<unsigned, 16>> batch_openings;
     std::filesystem::path openings_file;
     std::filesystem::path output_directory;
+    std::filesystem::path seed_sequence;
     bool verify_batch = false;
     bool sgf_path_overridden = false;
     bool tt_path_overridden = false;
@@ -100,7 +101,7 @@ CommandLine parseCommandLine(int argc, char** argv)
                                  option == "--node-limit" || option == "--progress-interval" ||
                                  option == "--network" || option == "--model" || option == "--sgf" ||
                                  option == "--opening" || option == "--openings-file" ||
-                                 option == "--output-dir" ||
+                                 option == "--output-dir" || option == "--seed-sequence" ||
                                  option == "--tt-file" || option == "--rzone-mode" ||
                                  option == "--rz-file" ||
                                  option == "--rzone-lookup-policy" ||
@@ -226,6 +227,11 @@ CommandLine parseCommandLine(int argc, char** argv)
                 throw std::invalid_argument("--output-dir may only be specified once");
             }
             command.output_directory = nextValue();
+        } else if (option == "--seed-sequence") {
+            if (!command.seed_sequence.empty()) {
+                throw std::invalid_argument("--seed-sequence may only be specified once");
+            }
+            command.seed_sequence = nextValue();
         } else if (option == "--verify") {
             command.verify_batch = true;
         }
@@ -259,6 +265,9 @@ CommandLine parseCommandLine(int argc, char** argv)
     } else {
         if (!command.output_directory.empty()) {
             throw std::invalid_argument("--output-dir requires batch openings");
+        }
+        if (!command.seed_sequence.empty()) {
+            throw std::invalid_argument("--seed-sequence requires batch openings");
         }
         if (command.verify_batch) {
             throw std::invalid_argument("--verify is currently a batch-mode option");
@@ -299,6 +308,7 @@ void printHelp(const char* program)
         << "  --opening SPEC         Add a batch opening; may be repeated\n"
         << "  --openings-file PATH   Read ordered batch openings, one per line\n"
         << "  --output-dir PATH      Write managed batch artifacts below PATH\n"
+        << "  --seed-sequence PATH   Start batch from existing TT/RZ and prepend their source SGFs\n"
         << "  --verify               Verify the completed batch proof sequence\n"
         << "  -h, --help             Show this help\n\n"
         << "With no options, all runtime settings are loaded from the default cfg.\n"
@@ -425,6 +435,42 @@ int runBatch(const CommandLine& command)
         output_directory / "proof_sequence.txt";
     const std::filesystem::path status_path = output_directory / "batch_status.txt";
     const bool rzone_enabled = settings.rzone_mode != RZoneMode::Disabled;
+    std::optional<ProofSequenceManifest> seed;
+    std::optional<ProofManifest> seed_final;
+    if (!command.seed_sequence.empty()) {
+        seed = readProofSequenceManifest(command.seed_sequence);
+        if (rzone_enabled != !seed->rz_path.empty()) {
+            throw std::invalid_argument("seed RZone presence must match the batch RZone mode");
+        }
+        if (!std::filesystem::is_regular_file(seed->tt_path) ||
+            (rzone_enabled && !std::filesystem::is_regular_file(seed->rz_path))) {
+            throw std::invalid_argument("seed proof snapshot is missing");
+        }
+        std::unordered_set<std::uint64_t> prior_openings;
+        for (const auto& path : seed->sgf_paths) {
+            auto manifest = readProofManifest(path);
+            if (manifest.root_outcome != Outcome::Win || !manifest.transposition_table ||
+                manifest.winning_tile != settings.winning_tile ||
+                manifest.tt_symmetry != settings.use_tt_symmetry) {
+                throw std::invalid_argument("seed SGF must be WIN with matching target and TT symmetry");
+            }
+            // Preserve the source bindings without reinterpreting old semantics.
+            if (rzone_enabled && (!manifest.hasRzArtifactBinding() ||
+                    *manifest.rz_semantics_version != RzFile::kSemanticsVersion)) {
+                throw std::invalid_argument("seed RZone semantics must match the current writer");
+            }
+            prior_openings.insert(manifest.root_board.raw);
+            seed_final = std::move(manifest);
+        }
+        if (!seed_final || !seed_final->hasArtifactBinding()) {
+            throw std::invalid_argument("seed final SGF must bind its TT snapshot");
+        }
+        for (const auto& opening : command.batch_openings) {
+            if (prior_openings.count(boardFromTiles(opening).raw)) {
+                throw std::invalid_argument("batch opening is already present in the seed sequence");
+            }
+        }
+    }
 
     requireNewBatchPath(tt_path);
     if (rzone_enabled) requireNewBatchPath(rz_path);
@@ -447,6 +493,7 @@ int runBatch(const CommandLine& command)
     status << "format_version=1\n"
            << "state=RUNNING\n"
            << "openings_total=" << command.batch_openings.size() << '\n';
+    if (seed) status << "seed_openings=" << seed->sgf_paths.size() << '\n';
     status.flush();
 
     struct RetainedSolver {
@@ -455,7 +502,8 @@ int runBatch(const CommandLine& command)
     };
     std::optional<RetainedSolver> retained;
     std::vector<std::filesystem::path> sgf_paths;
-    sgf_paths.reserve(command.batch_openings.size());
+    if (seed) sgf_paths = seed->sgf_paths;
+    sgf_paths.reserve(sgf_paths.size() + command.batch_openings.size());
     std::optional<RzFileSummary> accumulated_rz_summary;
 
     for (std::size_t index = 0; index < command.batch_openings.size(); ++index) {
@@ -483,6 +531,30 @@ int runBatch(const CommandLine& command)
         if (retained) {
             solver->adoptPersistentProofs(*retained->solver);
             retained.reset();
+        } else if (seed) {
+            std::cout << "loading seed TT: " << seed->tt_path.string() << std::endl;
+            const auto loaded_tt = TtFile::load(seed->tt_path, *solver);
+            if (*seed_final->tt_format_version != TtFile::kFormatVersion ||
+                *seed_final->tt_payload_checksum != loaded_tt.payload_checksum ||
+                *seed_final->tt_file_size != loaded_tt.file_size ||
+                *seed_final->tt_player_records != loaded_tt.player_entries ||
+                *seed_final->tt_environment_records != loaded_tt.environment_entries) {
+                throw std::invalid_argument("seed TT snapshot does not match its final SGF binding");
+            }
+            std::cout << "seed TT loaded: entries=" << loaded_tt.entries() << std::endl;
+            if (rzone_enabled) {
+                std::cout << "loading seed RZone: " << seed->rz_path.string() << std::endl;
+                const auto loaded_rz = RzFile::load(seed->rz_path, *solver);
+                if (*seed_final->rz_format_version != RzFile::kFormatVersion ||
+                    *seed_final->rz_prefix_record_count != loaded_rz.record_count ||
+                    *seed_final->rz_prefix_checksum != loaded_rz.payload_checksum) {
+                    throw std::invalid_argument("seed RZone snapshot does not match its final SGF binding");
+                }
+                // The loader validates the complete v3 snapshot and preserves
+                // its record IDs/payload; continue its verified prefix checksum.
+                accumulated_rz_summary = loaded_rz;
+                std::cout << "seed RZone loaded: certificates=" << loaded_rz.record_count << std::endl;
+            }
         }
 
         SearchResult result = solver->solve();
@@ -515,7 +587,7 @@ int runBatch(const CommandLine& command)
             opening,
             result,
             elapsed,
-            index != 0,
+            index != 0 || seed.has_value(),
             result.outcome == Outcome::Win && final_opening,
             tt_path,
             rz_path,
