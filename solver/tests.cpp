@@ -848,9 +848,9 @@ std::string validConfigText()
 
 void testSolverConfigParsingAndValidation()
 {
-    // The workspace configuration is an editable experiment configuration.
-    // Check that it parses; assert exact values using the isolated fixture below.
-    (void)solver2048::loadSolverConfig("solver/solver.cfg");
+    // Validate the versioned example independently of local experiment settings.
+    // Assert exact values using the isolated fixture below.
+    (void)solver2048::loadSolverConfig("solver/solver.cfg.example");
 
     TemporaryConfigFile valid(validConfigText());
     const SolverConfig parsed = solver2048::loadSolverConfig(valid.path);

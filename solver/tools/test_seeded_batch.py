@@ -15,7 +15,7 @@ solver = args.solver.resolve()
 
 with tempfile.TemporaryDirectory(prefix='solving2048-seed-test-') as name:
     work = Path(name)
-    settings = dict(line.split('=', 1) for line in (ROOT/'solver/solver.cfg').read_text().splitlines()
+    settings = dict(line.split('=', 1) for line in (ROOT/'solver/solver.cfg.example').read_text().splitlines()
                     if line and not line.startswith('#'))
     settings.update(winning_tile='8', node_limit='1000000', use_transposition_table='true',
                     use_tt_symmetry='true', load_tt='false', save_tt='true', load_rz='false',

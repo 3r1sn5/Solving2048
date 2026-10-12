@@ -7,6 +7,7 @@
 /solver/tree_viewer/__pycache__/
 /solver/tools/__pycache__/
 /.worktrees/
+/solver/solver.cfg
 *.tree-index/
 /.settings
 /.project

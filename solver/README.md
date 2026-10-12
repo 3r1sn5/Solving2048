@@ -86,7 +86,16 @@ python3 solver/tools/run_rzone_baseline.py --trimming \
 
 ## Defaults and configuration
 
-All runtime settings and the fixed opening are in `solver/solver.cfg`:
+Create your local configuration from the versioned example (run from the
+repository root):
+
+```bash
+cp -n solver/solver.cfg.example solver/solver.cfg
+```
+
+`solver/solver.cfg` contains your experiment settings and is ignored by Git.
+Keep reusable defaults in `solver/solver.cfg.example`. The example selects the
+accelerated `radix_tree` lookup policy and starts with:
 
 ```text
 opening       = 2@0, 2@1 (Player to move)
@@ -133,7 +142,7 @@ load_tt=false
 save_tt=true
 tt_path=result/RZ/8_RZ.tt
 rzone_mode=lookup
-rzone_lookup_policy=smallest_first
+rzone_lookup_policy=radix_tree
 use_rzone_symmetry=true
 rzone_max_cells=16
 rzone_shadow_exact_check=false

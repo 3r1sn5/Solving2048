@@ -1,0 +1,24 @@
+# Copy to solver/solver.cfg for local experiments; the local file is ignored by Git.
+winning_tile=8
+node_limit=0
+progress_interval=100000
+use_transposition_table=true
+use_tt_symmetry=true
+load_tt=false
+save_tt=true
+tt_path=result/RZ/8_RZ.tt
+rzone_mode=lookup
+rzone_lookup_policy=radix_tree
+use_rzone_symmetry=true
+rzone_max_cells=16
+rzone_shadow_exact_check=false
+rzone_active_pruning=false
+rzone_trimming=true
+rzone_full_board_placement_fallback=true
+load_rz=false
+save_rz=true
+rz_path=result/RZ/8_RZ.rz
+opening=2@0,2@1
+network=4x6patt
+model_path=models/4x6patt.w
+sgf_path=result/RZ/8_RZ.sgf
