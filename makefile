@@ -1,7 +1,8 @@
 # TDL2048+ makefile
 
 # C++ compiler options
-STD ?= c++20
+# Use the C++20 draft spelling for compatibility with GCC 9.
+STD ?= c++2a
 OLEVEL ?= 3
 ARCH ?= tune=native
 INSTS ?= abm bmi bmi2 avx avx2
@@ -11,9 +12,14 @@ OUTPUT ?= $(basename $(word 1, $(SOURCE)))
 SOLVER_OUTPUT ?= solver/solver2048
 SOLVER_TEST_OUTPUT ?= solver/solver_tests
 PROOF_CHECKER_OUTPUT ?= solver/proof_checker
+RZ_VIEWER_EXPORT_OUTPUT ?= solver/rz_viewer_export
+TREE_VIEWER_INDEX_OUTPUT ?= solver/tree_viewer_index
+TREE_VIEWER_STD ?= c++2a
 SOLVER_SOURCES := solver/main.cpp solver/config.cpp solver/game_api.cpp solver/rzone.cpp solver/rz_file.cpp solver/search.cpp solver/sgf.cpp solver/tt_file.cpp solver/proof_sequence.cpp solver/proof_checker.cpp solver/rz_proof_file.cpp 2048.cpp
 SOLVER_TEST_SOURCES := solver/tests.cpp solver/config.cpp solver/game_api.cpp solver/rzone.cpp solver/rz_file.cpp solver/rz_proof_file.cpp solver/search.cpp solver/sgf.cpp solver/tt_file.cpp solver/proof_sequence.cpp solver/proof_checker.cpp 2048.cpp
 PROOF_CHECKER_SOURCES := solver/proof_checker_main.cpp solver/proof_checker.cpp solver/proof_sequence.cpp solver/rz_proof_file.cpp solver/game_api.cpp 2048.cpp
+RZ_VIEWER_EXPORT_SOURCES := solver/rz_viewer_export.cpp solver/proof_sequence.cpp solver/rz_proof_file.cpp solver/game_api.cpp 2048.cpp
+TREE_VIEWER_INDEX_SOURCES := solver/tree_viewer_index.cpp solver/game_api.cpp 2048.cpp
 # other make options
 TARGET ?= default
 SCRIPT ?= make-profile.sh
@@ -69,6 +75,14 @@ proof-checker: # build the persistent-TT logical proof checker
 	$(CXX) -std=$(STD) -O$(OLEVEL) $(addprefix -m, $(ARCH) $(INSTS)) -pthread $(FLAGS) \
 		-DMOPORGIC_NO_MAIN -Wno-unused-parameter -Wno-deprecated-copy -I. -o $(PROOF_CHECKER_OUTPUT) $(PROOF_CHECKER_SOURCES)
 
+rz-viewer-export: # build the persistent-RZone viewer JSON exporter
+	$(CXX) -std=$(STD) -O$(OLEVEL) $(addprefix -m, $(ARCH) $(INSTS)) -pthread $(FLAGS) \
+		-DMOPORGIC_NO_MAIN -Wno-unused-parameter -Wno-deprecated-copy -I. -o $(RZ_VIEWER_EXPORT_OUTPUT) $(RZ_VIEWER_EXPORT_SOURCES)
+
+tree-viewer-index: # build the scalable SGF random-access indexer
+	$(CXX) -std=$(TREE_VIEWER_STD) -O$(OLEVEL) $(addprefix -m, $(ARCH) $(INSTS)) -pthread $(FLAGS) \
+		-DMOPORGIC_NO_MAIN -Wno-unused-parameter -Wno-deprecated-copy -I. -o $(TREE_VIEWER_INDEX_OUTPUT) $(TREE_VIEWER_INDEX_SOURCES)
+
 static: # build with static executable
 	@+$(MAKE) default ARCH="tune=generic" FLAGS="$(FLAGS) -static"
 
@@ -98,6 +112,6 @@ clean: # cleanup
 	$(if $(FILES), $(RM) $(FILES))
 
 solver-clean:
-	$(RM) $(SOLVER_OUTPUT) $(SOLVER_TEST_OUTPUT) $(PROOF_CHECKER_OUTPUT)
+	$(RM) $(SOLVER_OUTPUT) $(SOLVER_TEST_OUTPUT) $(PROOF_CHECKER_OUTPUT) $(RZ_VIEWER_EXPORT_OUTPUT) $(TREE_VIEWER_INDEX_OUTPUT)
 
-.PHONY: solver solver-test proof-checker solver-clean
+.PHONY: solver solver-test proof-checker rz-viewer-export tree-viewer-index solver-clean

@@ -241,8 +241,8 @@ in a merge in the original slide, including required empty cells. Restart after
 each successful removal. Every trial universally checks all non-winning
 completions outside the candidate mask, including previously removed cells.
 The slide must be legal and must either win anywhere or match its validated
-child pattern. No verification budget, value variants, or alternative slide
-search is used. The cell-count limit is applied after trimming.
+child pattern. No verification budget or alternative slide search is used.
+The cell-count limit is applied after trimming.
 
 Generation and snapshot loading summarize each independent line's completions;
 the standalone checker independently enumerates and combines reachable line

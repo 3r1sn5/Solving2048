@@ -1,0 +1,31 @@
+trim(rzone):
+    if next step is not sliding:
+        return rzone
+    rzone = copy of original rzone
+
+    while true:
+        for all positions t inside rzone's mask not being merged in the original next step:
+            # Include constrained empty cells.
+            mask = remove t from rzone's mask
+            check = success
+            for all possible non-winning boards b matching rzone board under mask:
+                # Check all combinations outside mask, including previously removed positions.
+                if original sliding is illegal on b:
+                    check = failure
+                    break
+                b = apply original sliding to b
+                if b contains a winning tile at any position:
+                    continue
+                if b does not match the validated child rzone pattern:
+                    check = failure
+                    break
+            if check is success:
+                rzone's mask = mask
+                break
+        if no position has been removed from rzone's mask:
+            break
+
+    return save rzone as a new validated certificate
+
+# Removing a mask constraint does not fix that position to 0.
+# The proof checker must also accept: winning tile anywhere OR matching child pattern.

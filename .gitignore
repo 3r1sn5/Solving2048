@@ -4,6 +4,10 @@
 /Debug
 /Default
 /__pycache__
+/solver/tree_viewer/__pycache__/
+/solver/tools/__pycache__/
+/.worktrees/
+*.tree-index/
 /.settings
 /.project
 /.cproject
@@ -20,6 +24,8 @@
 /solver/solver2048
 /solver/solver_tests
 /solver/proof_checker
+/solver/rz_viewer_export
+/solver/tree_viewer_index
 /solver/*.sgf
 /solver/*.sgf.tmp
 
