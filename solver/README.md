@@ -141,11 +141,9 @@ use_tt_symmetry=true
 load_tt=false
 save_tt=true
 tt_path=result/RZ/8_RZ.tt
-rzone_mode=lookup
-rzone_lookup_policy=radix_tree
+use_rzone=true
 use_rzone_symmetry=true
 rzone_max_cells=16
-rzone_shadow_exact_check=false
 rzone_active_pruning=false
 rzone_trimming=true
 rzone_full_board_placement_fallback=true
@@ -266,12 +264,19 @@ and successful lift constructions whose masks were reduced (before interning).
 
 ### First RZone implementation
 
-`rzone_mode=generate` derives immutable Player-Win certificates during normal
-backpropagation but never looks them up. It is the control run for measuring
-certificate-generation overhead: exact-TT node and action counts remain the
-same as the RZone-disabled baseline.
+`use_rzone=true` enables certificate generation and lookup; `use_rzone=false`
+disables both, including active pruning and RZone snapshot loading/saving.
+The CLI overrides are `--rzone` and `--no-rzone`. The lookup policy is fixed to
+`radix_tree` for normal solves. Remove the old `rzone_mode` and
+`rzone_lookup_policy` cfg keys; they and their CLI overrides are no longer accepted.
+SGFs still record the effective mode and policy for proof/viewer compatibility.
 
-`rzone_mode=lookup` checks the in-memory RZone table before the exact TT. A
+The internal `RZoneMode::Generate` remains available to C++ tests. It derives
+certificates without looking them up, allowing tests to measure generation
+without changing the baseline search. Internal tests also retain all three
+lookup policies and compare their results.
+
+With RZone enabled, the solver checks the in-memory RZone table before the exact TT. A
 matching partial board pattern returns a Win proof leaf without replay and
 without generating that node's actions. Certificates are built by
 three local rules: a one-cell winning terminal, a fixed winning Player slide
@@ -284,8 +289,8 @@ recorded for diagnostics and tie-breaking but does not limit derivation.
 `rzone_trimming=false` skips trimming when generating FixedSlide certificates,
 retaining the original slide preimage mask. `rzone_full_board_placement_fallback=false`
 disables generation of full-board Environment certificates when universal placement
-lifting fails. These switches are independent of active pruning and apply in both
-`generate` and `lookup` modes. They have no effect when RZone is disabled.
+lifting fails. These switches are independent of active pruning and apply to both
+normal solves and internal generation-only tests. They have no effect when RZone is disabled.
 Both settings are recorded in the console output and SGF root metadata.
 
 The switches control new certificate generation; valid certificates loaded from
@@ -293,7 +298,7 @@ The switches control new certificate generation; valid certificates loaded from
 comparisons, use `load_tt=false`, `load_rz=false`, and a fresh single-opening solve
 for each setting combination.
 
-`rzone_lookup_policy=full_scan` preserves the original policy: scan every
+The internal `FullScan` policy preserves the original lookup: scan every
 indexed mask and choose the globally smallest-cell certificate, then shortest
 depth and oldest ID. `smallest_first` groups masks by cell count, checks groups
 from one to sixteen cells, completes the depth/ID/transform tie-break within
@@ -310,8 +315,7 @@ Certificate IDs, match tie-breaking, and the persistent format are unchanged.
 `RZone unique masks` still counts distinct masks across both phases once;
 mask-test and candidate counters now count only work in the queried phase.
 
-`rzone_lookup_policy=radix_tree` (or `--rzone-lookup-policy radix_tree`) selects
-a path-compressed radix index instead of enumerating masks. Keys contain sixteen
+Normal solves use a path-compressed radix index instead of enumerating masks. Keys contain sixteen
 tile-rank symbols and a distinct wildcard symbol, so a constrained empty cell
 does not match an occupied cell. Separate roots cover each phase and cell count;
 queries follow both the exact-symbol and wildcard edges. Compressed prefixes
@@ -325,10 +329,11 @@ using integer node links. The `.rz` format and proof checker are unchanged.
 Radix logs/SGFs report index nodes, visited nodes, prefix rejections, and rank-bound
 prunes; `lookup_masks_tested` is zero in this mode. Candidate and pattern-match
 counts measure visited matching leaves, not all certificates in a hash bucket.
-The existing `smallest_first` policy remains available as the benchmark control.
+The internal `SmallestFirst` policy remains available as a test reference.
 
 Use `solver/tools/run_radix_experiment.py` to run a fresh-cache experiment with
-an explicit binary, model, target, policy, and new output directory. It records
+an explicit binary, model, target, and new output directory. This tool now uses
+the fixed radix policy and no longer accepts `--policy`. It records
 search wall time separately from process wall time, `/usr/bin/time` resource
 usage, binary/model hashes, and TT/RZ/normalized-SGF hashes. Pass `--checker` to
 independently verify the resulting proof. `--node-limit 0` is a full solve.
@@ -376,7 +381,7 @@ remaining placement sibling instead of making each sibling scan the full
 RZone index. A match becomes the same lightweight `RZONE_TT` Win leaf as a
 normal lookup, in the original placement order, so the current SGF proof and
 proof checker behavior are unchanged. The optimization requires
-`rzone_mode=lookup`; use `--no-rzone-active-pruning` for the passive-lookup
+`use_rzone=true`; use `--no-rzone-active-pruning` for the passive-lookup
 baseline.
 
 Placement diagnostics are printed in the final solver summary and saved in the
@@ -492,9 +497,9 @@ solver/solver2048 --config solver/solver.cfg \
   --output-dir result/target32-multi
 ```
 
-Batch mode requires the exact TT in its first version. It starts with empty
-proof tables, keeps the accumulated TT/RZone in memory between openings, and
-writes only the final `proof.tt` and optional `proof.rz`. Each opening gets an
+Batch mode follows `use_transposition_table` in the cfg. It starts with empty
+proof tables, keeps the enabled TT/RZone tables in memory between openings, and
+writes only their final snapshots (`proof.tt` and/or `proof.rz`). Each opening gets an
 ordered `sgf/000001.sgf` file. `proof_sequence.txt` binds those SGFs to the
 final artifacts, while `batch_status.txt` records per-opening outcome, nodes,
 time, and cumulative record counts. Existing managed output files are never
@@ -502,6 +507,20 @@ overwritten; resume/checkpoint support is intentionally deferred.
 The single-run-only `opening` and `sgf_path` keys may be omitted from a config
 used with `--openings-file` or `--opening`; TT/RZone paths and load/save flags
 are also replaced by the batch-managed files below `--output-dir`.
+
+For an RZone-only batch, set:
+
+```ini
+use_transposition_table=false
+use_rzone=true
+rzone_active_pruning=true
+```
+
+In batch mode, disabling TT also disables its symmetry/load/save options;
+`use_tt_symmetry`, `load_tt`, `save_tt`, and `tt_path` may be left unchanged or
+omitted. No TT file is read or written, and the sequence manifest omits `tt=`.
+Both `--verify` and the standalone checker accept these sequences.
+The cfg key is `use_transposition_table`, not `TT`.
 
 Only a `WIN` opening is committed to the sequence. A non-Win result writes its
 diagnostic SGF, stops the batch, and publishes neither final artifacts nor a
@@ -545,7 +564,11 @@ solver/proof_checker \
   --rz result/final.rz
 ```
 
-The checker reopens all supplied files and independently validates both binary
+Omit `--tt` when every SGF has TT disabled, including multi-opening sequences.
+An SGF that enables TT still requires the final TT snapshot. `--sequence` reads
+these paths from the manifest, where `tt=` is optional for TT-disabled proofs.
+
+The checker reopens all supplied files and independently validates the supplied binary
 formats, checksums, and RZone certificate semantics. It streams the entire SGF
 DFS trace, independently replays every slide and placement, and verifies
 terminal classification, phase alternation, AND/OR backup,
@@ -570,7 +593,7 @@ Trace-local TT references may use only completed sources in the current SGF;
 persistent TT/RZone references may use only sources established by earlier
 SGFs. Declared loaded-entry counts must equal the accumulated earlier sources,
 while the checker derives newly verified states directly from each trace. The
-last SGF is bound exactly to the supplied final TT checksum and counts. Earlier
+last SGF with TT enabled is bound exactly to the supplied final TT checksum and counts. Earlier
 TT snapshots need not remain on disk or carry a checksum because TT
 serialization is not prefix-stable. Every RZone
 manifest is checked directly against the supplied final append-only prefix.
@@ -693,15 +716,17 @@ far larger unlimited raw DFS baseline (`--no-tt`) remains an opt-in benchmark.
 
 ### Continuing a batch from an existing proof sequence
 
-`--seed-sequence PATH` loads that manifest's TT and optional RZ snapshot once,
+`--seed-sequence PATH` loads that manifest's enabled TT/RZ snapshots once,
 then searches only the new openings passed via `--openings-file` or `--opening`.
 The output directory must have no existing batch artifacts. Seed files are
 read-only inputs, and all seed SGFs are prepended to the final proof sequence.
 The first new opening records the loaded proof counts and persistent sources;
 subsequent openings adopt the accumulated tables as in an ordinary batch.
 
-Use a complete, previously verified seed sequence. Its target and TT symmetry
-must match the new batch, and its RZ presence must match the configured RZ mode.
+Use a complete, previously verified seed sequence. Its target, TT mode, and
+TT symmetry (when enabled) must match the new batch. Its TT/RZ file presence
+must match the configured modes; RZone-only seeds need no TT file. Switching
+TT on or off midway through an existing sequence is rejected.
 RZ seed bindings must use the current writer semantics (v3); legacy snapshots
 remain usable in single runs but are not migrated by this continuation option.
 The loaded snapshots must match the final seed SGF's artifact bindings. An
@@ -718,5 +743,7 @@ solver/solver2048 --config run.cfg --seed-sequence seed_sequence.txt \
   --openings-file remaining.txt --output-dir result/continued --verify
 ```
 
-Run `python3 solver/tools/test_seeded_batch.py` after `make solver` to check
-continuation, proof lineage, immutable inputs, and incompatible seed rejection.
+Run `python3 solver/tools/test_seeded_batch.py` after `make solver proof-checker`
+to check TT/RZone, TT-only, RZone-only and trace-only continuation, proof lineage,
+immutable inputs, and incompatible seed rejection. Use `--solver` and `--checker`
+to test binaries built at other paths.

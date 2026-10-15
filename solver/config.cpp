@@ -67,33 +67,6 @@ bool parseBool(std::string value,
     throw configError(path, line, key + " requires true, false, 1, or 0");
 }
 
-RZoneMode parseRZoneMode(std::string value,
-                         const std::filesystem::path& path,
-                         std::size_t line)
-{
-    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char character) {
-        return static_cast<char>(std::tolower(character));
-    });
-    if (value == "disabled") return RZoneMode::Disabled;
-    if (value == "generate") return RZoneMode::Generate;
-    if (value == "lookup") return RZoneMode::Lookup;
-    throw configError(path, line, "rzone_mode requires disabled, generate, or lookup");
-}
-
-RZoneLookupPolicy parseRZoneLookupPolicy(std::string value,
-                                         const std::filesystem::path& path,
-                                         std::size_t line)
-{
-    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char character) {
-        return static_cast<char>(std::tolower(character));
-    });
-    if (value == "full_scan") return RZoneLookupPolicy::FullScan;
-    if (value == "smallest_first") return RZoneLookupPolicy::SmallestFirst;
-    if (value == "radix_tree") return RZoneLookupPolicy::RadixTree;
-    throw configError(
-        path, line, "rzone_lookup_policy requires full_scan, smallest_first, or radix_tree");
-}
-
 std::array<unsigned, 16> parseOpening(const std::string& value,
                                       const std::filesystem::path& path,
                                       std::size_t line)
@@ -139,6 +112,21 @@ std::array<unsigned, 16> parseOpening(const std::string& value,
 
 } // namespace
 
+void normalizeSolverConfig(SolverConfig& value, bool require_single_run_fields)
+{
+    if (!require_single_run_fields && !value.use_transposition_table) {
+        value.use_tt_symmetry = false;
+        value.load_tt = false;
+        value.save_tt = false;
+        value.tt_path.clear();
+    }
+    if (!value.use_rzone) {
+        value.rzone_active_pruning = false;
+        value.load_rz = false;
+        value.save_rz = false;
+    }
+}
+
 void validateSolverConfig(const SolverConfig& value, bool require_single_run_fields)
 {
     if (value.winning_tile < 2 ||
@@ -158,18 +146,12 @@ void validateSolverConfig(const SolverConfig& value, bool require_single_run_fie
     if (value.rzone_max_cells == 0 || value.rzone_max_cells > 16) {
         throw std::invalid_argument("rzone_max_cells must be in [1, 16]");
     }
-    if (value.rzone_shadow_exact_check && value.rzone_mode != RZoneMode::Lookup) {
-        throw std::invalid_argument("rzone_shadow_exact_check=true requires rzone_mode=lookup");
+    if (value.rzone_active_pruning && !value.use_rzone) {
+        throw std::invalid_argument("rzone_active_pruning=true requires use_rzone=true");
     }
-    if (value.rzone_shadow_exact_check && !value.use_transposition_table) {
-        throw std::invalid_argument("rzone_shadow_exact_check=true requires exact TT");
-    }
-    if (value.rzone_active_pruning && value.rzone_mode != RZoneMode::Lookup) {
-        throw std::invalid_argument("rzone_active_pruning=true requires rzone_mode=lookup");
-    }
-    if ((value.load_rz || value.save_rz) && value.rzone_mode == RZoneMode::Disabled) {
+    if ((value.load_rz || value.save_rz) && !value.use_rzone) {
         throw std::invalid_argument(
-            "load_rz/save_rz require rzone_mode=generate or rzone_mode=lookup");
+            "load_rz/save_rz require use_rzone=true");
     }
     if ((value.load_rz || value.save_rz) && value.rz_path.empty()) {
         throw std::invalid_argument("rz_path cannot be empty when persistent RZone is enabled");
@@ -211,11 +193,9 @@ SolverConfig loadSolverConfig(
         "load_tt",
         "save_tt",
         "tt_path",
-        "rzone_mode",
-        "rzone_lookup_policy",
+        "use_rzone",
         "use_rzone_symmetry",
         "rzone_max_cells",
-        "rzone_shadow_exact_check",
         "rzone_active_pruning",
         "rzone_trimming",
         "rzone_full_board_placement_fallback",
@@ -278,10 +258,8 @@ SolverConfig loadSolverConfig(
             result.save_tt = parseBool(value, path, line_number, key);
         } else if (key == "tt_path") {
             result.tt_path = value;
-        } else if (key == "rzone_mode") {
-            result.rzone_mode = parseRZoneMode(value, path, line_number);
-        } else if (key == "rzone_lookup_policy") {
-            result.rzone_lookup_policy = parseRZoneLookupPolicy(value, path, line_number);
+        } else if (key == "use_rzone") {
+            result.use_rzone = parseBool(value, path, line_number, key);
         } else if (key == "use_rzone_symmetry") {
             result.use_rzone_symmetry = parseBool(value, path, line_number, key);
         } else if (key == "rzone_max_cells") {
@@ -290,8 +268,6 @@ SolverConfig loadSolverConfig(
                 throw configError(path, line_number, "rzone_max_cells exceeds unsigned range");
             }
             result.rzone_max_cells = static_cast<unsigned>(parsed);
-        } else if (key == "rzone_shadow_exact_check") {
-            result.rzone_shadow_exact_check = parseBool(value, path, line_number, key);
         } else if (key == "rzone_active_pruning") {
             result.rzone_active_pruning = parseBool(value, path, line_number, key);
         } else if (key == "rzone_trimming") {
@@ -322,9 +298,15 @@ SolverConfig loadSolverConfig(
             (key == "opening" || key == "sgf_path")) {
             continue;
         }
+        if (!require_single_run_fields && !result.use_transposition_table &&
+            (key == "use_tt_symmetry" || key == "load_tt" ||
+             key == "save_tt" || key == "tt_path")) {
+            continue;
+        }
         if (seen.count(key) == 0) throw configError(path, 0, "missing required key: " + key);
     }
     try {
+        normalizeSolverConfig(result, require_single_run_fields);
         validateSolverConfig(result, require_single_run_fields);
     } catch (const std::exception& error) {
         throw configError(path, 0, error.what());

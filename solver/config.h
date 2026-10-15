@@ -19,11 +19,9 @@ struct SolverConfig {
     bool load_tt = false;
     bool save_tt = false;
     std::filesystem::path tt_path;
-    RZoneMode rzone_mode = RZoneMode::Disabled;
-    RZoneLookupPolicy rzone_lookup_policy = RZoneLookupPolicy::FullScan;
+    bool use_rzone = false;
     bool use_rzone_symmetry = false;
     unsigned rzone_max_cells = 16;
-    bool rzone_shadow_exact_check = false;
     bool rzone_active_pruning = false;
     bool rzone_trimming = true;
     bool rzone_full_board_placement_fallback = true;
@@ -48,6 +46,8 @@ SolverConfig loadSolverConfig(
 void validateSolverConfig(
     const SolverConfig& config,
     bool require_single_run_fields = true);
+// Disable dependent options when their cache is off (TT normalization is batch-only).
+void normalizeSolverConfig(SolverConfig& config, bool require_single_run_fields = true);
 std::array<unsigned, 16> parseOpeningSpec(const std::string& value);
 std::vector<std::array<unsigned, 16>> loadOpeningsFile(
     const std::filesystem::path& path);

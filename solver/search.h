@@ -150,7 +150,6 @@ struct SolverOptions {
     RZoneLookupPolicy rzone_lookup_policy = RZoneLookupPolicy::FullScan;
     bool use_rzone_symmetry = false;
     unsigned rzone_max_cells = 16;
-    bool rzone_shadow_exact_check = false;
     bool rzone_active_pruning = false;
     bool rzone_trimming = true;
     bool rzone_full_board_placement_fallback = true;
@@ -203,7 +202,7 @@ private:
     bool lookupEnvironmentTransposition(Board afterstate, TraceNode& trace);
     bool lookupRZone(Board board, Phase phase, TraceNode& trace);
     void resolveRZoneMatch(
-        Board board, Phase phase, const RZoneMatch& match, TraceNode& trace);
+        Phase phase, const RZoneMatch& match, TraceNode& trace);
     void annotateRZone(
         TraceNode& trace,
         RZoneCertificateId id,
@@ -213,7 +212,6 @@ private:
     void liftPlayerRZone(
         Board board, Direction direction, const TraceNode& child, TraceNode& trace);
     void liftEnvironmentRZone(Board board, TraceNode& trace);
-    void validateRZoneAgainstExact(Board board, Phase phase) const;
     void storePlayerTransposition(Board board, const TraceNode& trace);
     void storeEnvironmentTransposition(Board afterstate, const TraceNode& trace);
     CanonicalBoard transpositionKey(Board board) const;

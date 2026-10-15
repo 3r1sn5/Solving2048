@@ -55,8 +55,6 @@ std::string nodeComment(const TraceNode& node, const SgfMetadata* metadata)
                 << '\n' << "rzone_symmetry = "
                 << (metadata->use_rzone_symmetry ? "enabled" : "disabled")
                 << '\n' << "rzone_max_cells = " << metadata->rzone_max_cells
-                << '\n' << "rzone_shadow_exact_check = "
-                << (metadata->rzone_shadow_exact_check ? "enabled" : "disabled")
                 << '\n' << "rzone_active_pruning = "
                 << (metadata->rzone_active_pruning ? "enabled" : "disabled")
                 << '\n' << "rzone_trimming = "

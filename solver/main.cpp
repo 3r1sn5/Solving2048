@@ -66,23 +66,6 @@ std::uint64_t parseUnsigned(const std::string& text, const char* option)
     return value;
 }
 
-RZoneMode parseRZoneModeOption(const std::string& text)
-{
-    if (text == "disabled") return RZoneMode::Disabled;
-    if (text == "generate") return RZoneMode::Generate;
-    if (text == "lookup") return RZoneMode::Lookup;
-    throw std::invalid_argument("--rzone-mode requires disabled, generate, or lookup");
-}
-
-RZoneLookupPolicy parseRZoneLookupPolicyOption(const std::string& text)
-{
-    if (text == "full_scan") return RZoneLookupPolicy::FullScan;
-    if (text == "smallest_first") return RZoneLookupPolicy::SmallestFirst;
-    if (text == "radix_tree") return RZoneLookupPolicy::RadixTree;
-    throw std::invalid_argument(
-        "--rzone-lookup-policy requires full_scan, smallest_first, or radix_tree");
-}
-
 CommandLine parseCommandLine(int argc, char** argv)
 {
     CommandLine command;
@@ -103,11 +86,11 @@ CommandLine parseCommandLine(int argc, char** argv)
                                  option == "--network" || option == "--model" || option == "--sgf" ||
                                  option == "--opening" || option == "--openings-file" ||
                                  option == "--output-dir" || option == "--seed-sequence" ||
-                                 option == "--tt-file" || option == "--rzone-mode" ||
+                                 option == "--tt-file" ||
                                  option == "--rz-file" ||
-                                 option == "--rzone-lookup-policy" ||
                                  option == "--rzone-max-cells";
         const bool is_flag = option == "--tt" || option == "--no-tt" ||
+                             option == "--rzone" || option == "--no-rzone" ||
                              option == "--tt-symmetry" || option == "--no-tt-symmetry" ||
                              option == "--load-tt" || option == "--no-load-tt" ||
                              option == "--save-tt" || option == "--no-save-tt" ||
@@ -115,8 +98,6 @@ CommandLine parseCommandLine(int argc, char** argv)
                              option == "--save-rz" || option == "--no-save-rz" ||
                              option == "--rzone-symmetry" ||
                              option == "--no-rzone-symmetry" ||
-                             option == "--rzone-shadow-exact-check" ||
-                             option == "--no-rzone-shadow-exact-check" ||
                              option == "--rzone-active-pruning" ||
                              option == "--no-rzone-active-pruning" ||
                              option == "--verify";
@@ -172,15 +153,10 @@ CommandLine parseCommandLine(int argc, char** argv)
         } else if (option == "--tt-file") {
             command.settings.tt_path = nextValue();
             command.tt_path_overridden = true;
-        } else if (option == "--rzone-mode") {
-            command.settings.rzone_mode = parseRZoneModeOption(nextValue());
-            if (command.settings.rzone_mode == RZoneMode::Disabled) {
-                command.settings.load_rz = false;
-                command.settings.save_rz = false;
-            }
-        } else if (option == "--rzone-lookup-policy") {
-            command.settings.rzone_lookup_policy =
-                parseRZoneLookupPolicyOption(nextValue());
+        } else if (option == "--rzone") {
+            command.settings.use_rzone = true;
+        } else if (option == "--no-rzone") {
+            command.settings.use_rzone = false;
         } else if (option == "--rzone-symmetry") {
             command.settings.use_rzone_symmetry = true;
         } else if (option == "--no-rzone-symmetry") {
@@ -189,10 +165,6 @@ CommandLine parseCommandLine(int argc, char** argv)
             const std::uint64_t value = parseUnsigned(nextValue(), "--rzone-max-cells");
             if (value > 16) throw std::invalid_argument("--rzone-max-cells must be in [1, 16]");
             command.settings.rzone_max_cells = static_cast<unsigned>(value);
-        } else if (option == "--rzone-shadow-exact-check") {
-            command.settings.rzone_shadow_exact_check = true;
-        } else if (option == "--no-rzone-shadow-exact-check") {
-            command.settings.rzone_shadow_exact_check = false;
         } else if (option == "--rzone-active-pruning") {
             command.settings.rzone_active_pruning = true;
         } else if (option == "--no-rzone-active-pruning") {
@@ -259,10 +231,6 @@ CommandLine parseCommandLine(int argc, char** argv)
                 throw std::invalid_argument("batch opening list contains a duplicate");
             }
         }
-        if (!command.settings.use_transposition_table) {
-            throw std::invalid_argument(
-                "first-version batch mode requires the transposition table");
-        }
     } else {
         if (!command.output_directory.empty()) {
             throw std::invalid_argument("--output-dir requires batch openings");
@@ -274,6 +242,7 @@ CommandLine parseCommandLine(int argc, char** argv)
             throw std::invalid_argument("--verify is currently a batch-mode option");
         }
     }
+    normalizeSolverConfig(command.settings, !command.batchMode());
     validateSolverConfig(command.settings, !command.batchMode());
     return command;
 }
@@ -294,14 +263,12 @@ void printHelp(const char* program)
         << "  --load-tt / --no-load-tt  Load or skip the persistent TT snapshot\n"
         << "  --save-tt / --no-save-tt  Save or skip the merged persistent TT snapshot\n"
         << "  --tt-file PATH          Override persistent TT file path\n"
-        << "  --rzone-mode MODE      disabled, generate, or lookup\n"
-        << "  --rzone-lookup-policy POLICY  full_scan, smallest_first, or radix_tree\n"
+        << "  --rzone / --no-rzone    Enable or disable RZone (radix-tree lookup)\n"
         << "  --rzone-symmetry / --no-rzone-symmetry  Search all 8 D4 orientations\n"
         << "  --rzone-max-cells N    Maximum cells in an RZone pattern (1..16)\n"
         << "  --load-rz / --no-load-rz  Load or skip the persistent RZone snapshot\n"
         << "  --save-rz / --no-save-rz  Save or skip the merged persistent RZone snapshot\n"
         << "  --rz-file PATH          Override persistent RZone file path\n"
-        << "  --rzone-shadow-exact-check / --no-rzone-shadow-exact-check\n"
         << "  --rzone-active-pruning / --no-rzone-active-pruning\n"
         << "  --network NAME         Override N-tuple network\n"
         << "  --model PATH           Override N-tuple weight file\n"
@@ -334,11 +301,10 @@ SolverOptions solverOptions(const SolverConfig& settings)
     options.progress_interval = settings.progress_interval;
     options.use_transposition_table = settings.use_transposition_table;
     options.use_tt_symmetry = settings.use_tt_symmetry;
-    options.rzone_mode = settings.rzone_mode;
-    options.rzone_lookup_policy = settings.rzone_lookup_policy;
+    options.rzone_mode = settings.use_rzone ? RZoneMode::Lookup : RZoneMode::Disabled;
+    options.rzone_lookup_policy = RZoneLookupPolicy::RadixTree;
     options.use_rzone_symmetry = settings.use_rzone_symmetry;
     options.rzone_max_cells = settings.rzone_max_cells;
-    options.rzone_shadow_exact_check = settings.rzone_shadow_exact_check;
     options.rzone_active_pruning = settings.rzone_active_pruning;
     options.rzone_trimming = settings.rzone_trimming;
     options.rzone_full_board_placement_fallback = settings.rzone_full_board_placement_fallback;
@@ -387,16 +353,15 @@ SgfMetadata batchSgfMetadata(
     metadata.node_limit = settings.node_limit;
     metadata.use_transposition_table = settings.use_transposition_table;
     metadata.use_tt_symmetry = settings.use_tt_symmetry;
-    metadata.rzone_mode = settings.rzone_mode;
-    metadata.rzone_lookup_policy = settings.rzone_lookup_policy;
+    metadata.rzone_mode = settings.use_rzone ? RZoneMode::Lookup : RZoneMode::Disabled;
+    metadata.rzone_lookup_policy = RZoneLookupPolicy::RadixTree;
     metadata.use_rzone_symmetry = settings.use_rzone_symmetry;
     metadata.rzone_max_cells = settings.rzone_max_cells;
-    metadata.rzone_shadow_exact_check = settings.rzone_shadow_exact_check;
     metadata.rzone_active_pruning = settings.rzone_active_pruning;
     metadata.rzone_trimming = settings.rzone_trimming;
     metadata.rzone_full_board_placement_fallback = settings.rzone_full_board_placement_fallback;
-    metadata.load_tt = has_prior_opening;
-    metadata.save_tt = final_opening;
+    metadata.load_tt = has_prior_opening && settings.use_transposition_table;
+    metadata.save_tt = final_opening && settings.use_transposition_table;
     metadata.tt_path = tt_path;
     if (tt_summary) {
         metadata.tt_format_version = TtFile::kFormatVersion;
@@ -405,7 +370,7 @@ SgfMetadata batchSgfMetadata(
         metadata.tt_player_records = tt_summary->player_entries;
         metadata.tt_environment_records = tt_summary->environment_entries;
     }
-    const bool rzone_enabled = settings.rzone_mode != RZoneMode::Disabled;
+    const bool rzone_enabled = settings.use_rzone;
     metadata.load_rz = has_prior_opening && rzone_enabled;
     metadata.save_rz = final_opening && rzone_enabled;
     metadata.rz_path = rz_path;
@@ -430,30 +395,36 @@ int runBatch(const CommandLine& command)
     const std::filesystem::path output_directory =
         std::filesystem::absolute(command.output_directory).lexically_normal();
     const std::filesystem::path sgf_directory = output_directory / "sgf";
-    const std::filesystem::path tt_path = output_directory / "proof.tt";
+    const bool tt_enabled = settings.use_transposition_table;
+    const std::filesystem::path tt_path = tt_enabled
+        ? output_directory / "proof.tt" : std::filesystem::path{};
     const std::filesystem::path rz_path = output_directory / "proof.rz";
     const std::filesystem::path sequence_path =
         output_directory / "proof_sequence.txt";
     const std::filesystem::path status_path = output_directory / "batch_status.txt";
-    const bool rzone_enabled = settings.rzone_mode != RZoneMode::Disabled;
+    const bool rzone_enabled = settings.use_rzone;
     std::optional<ProofSequenceManifest> seed;
     std::optional<ProofManifest> seed_final;
     if (!command.seed_sequence.empty()) {
         seed = readProofSequenceManifest(command.seed_sequence);
+        if (tt_enabled != !seed->tt_path.empty()) {
+            throw std::invalid_argument("seed TT presence must match the batch TT mode");
+        }
         if (rzone_enabled != !seed->rz_path.empty()) {
             throw std::invalid_argument("seed RZone presence must match the batch RZone mode");
         }
-        if (!std::filesystem::is_regular_file(seed->tt_path) ||
+        if ((tt_enabled && !std::filesystem::is_regular_file(seed->tt_path)) ||
             (rzone_enabled && !std::filesystem::is_regular_file(seed->rz_path))) {
             throw std::invalid_argument("seed proof snapshot is missing");
         }
         std::unordered_set<std::uint64_t> prior_openings;
         for (const auto& path : seed->sgf_paths) {
             auto manifest = readProofManifest(path);
-            if (manifest.root_outcome != Outcome::Win || !manifest.transposition_table ||
+            if (manifest.root_outcome != Outcome::Win ||
+                manifest.transposition_table != tt_enabled ||
                 manifest.winning_tile != settings.winning_tile ||
-                manifest.tt_symmetry != settings.use_tt_symmetry) {
-                throw std::invalid_argument("seed SGF must be WIN with matching target and TT symmetry");
+                (tt_enabled && manifest.tt_symmetry != settings.use_tt_symmetry)) {
+                throw std::invalid_argument("seed SGF must be WIN with matching target, TT mode and TT symmetry");
             }
             // Preserve the source bindings without reinterpreting old semantics.
             if (rzone_enabled && (!manifest.hasRzArtifactBinding() ||
@@ -463,7 +434,7 @@ int runBatch(const CommandLine& command)
             prior_openings.insert(manifest.root_board.raw);
             seed_final = std::move(manifest);
         }
-        if (!seed_final || !seed_final->hasArtifactBinding()) {
+        if (tt_enabled && (!seed_final || !seed_final->hasArtifactBinding())) {
             throw std::invalid_argument("seed final SGF must bind its TT snapshot");
         }
         for (const auto& opening : command.batch_openings) {
@@ -473,7 +444,7 @@ int runBatch(const CommandLine& command)
         }
     }
 
-    requireNewBatchPath(tt_path);
+    if (tt_enabled) requireNewBatchPath(tt_path);
     if (rzone_enabled) requireNewBatchPath(rz_path);
     requireNewBatchPath(sequence_path);
     requireNewBatchPath(status_path);
@@ -533,16 +504,18 @@ int runBatch(const CommandLine& command)
             solver->adoptPersistentProofs(*retained->solver);
             retained.reset();
         } else if (seed) {
-            std::cout << "loading seed TT: " << seed->tt_path.string() << std::endl;
-            const auto loaded_tt = TtFile::load(seed->tt_path, *solver);
-            if (*seed_final->tt_format_version != TtFile::kFormatVersion ||
-                *seed_final->tt_payload_checksum != loaded_tt.payload_checksum ||
-                *seed_final->tt_file_size != loaded_tt.file_size ||
-                *seed_final->tt_player_records != loaded_tt.player_entries ||
-                *seed_final->tt_environment_records != loaded_tt.environment_entries) {
-                throw std::invalid_argument("seed TT snapshot does not match its final SGF binding");
+            if (tt_enabled) {
+                std::cout << "loading seed TT: " << seed->tt_path.string() << std::endl;
+                const auto loaded_tt = TtFile::load(seed->tt_path, *solver);
+                if (*seed_final->tt_format_version != TtFile::kFormatVersion ||
+                    *seed_final->tt_payload_checksum != loaded_tt.payload_checksum ||
+                    *seed_final->tt_file_size != loaded_tt.file_size ||
+                    *seed_final->tt_player_records != loaded_tt.player_entries ||
+                    *seed_final->tt_environment_records != loaded_tt.environment_entries) {
+                    throw std::invalid_argument("seed TT snapshot does not match its final SGF binding");
+                }
+                std::cout << "seed TT loaded: entries=" << loaded_tt.entries() << std::endl;
             }
-            std::cout << "seed TT loaded: entries=" << loaded_tt.entries() << std::endl;
             if (rzone_enabled) {
                 std::cout << "loading seed RZone: " << seed->rz_path.string() << std::endl;
                 const auto loaded_rz = RzFile::load(seed->rz_path, *solver);
@@ -572,7 +545,7 @@ int runBatch(const CommandLine& command)
         }
         std::optional<TtFileSummary> tt_summary;
         if (result.outcome == Outcome::Win && final_opening) {
-            tt_summary = TtFile::save(tt_path, *solver);
+            if (tt_enabled) tt_summary = TtFile::save(tt_path, *solver);
             if (rzone_enabled) {
                 const RzFileSummary saved = RzFile::save(rz_path, *solver);
                 if (saved.record_count != rz_summary->record_count ||
@@ -643,14 +616,15 @@ int runBatch(const CommandLine& command)
            << "sequence=" << sequence_path.string() << '\n';
     status.close();
 
-    std::cout << "batch proof sequence: " << sequence_path.string() << '\n'
-              << "final TT: " << tt_path.string() << '\n';
+    std::cout << "batch proof sequence: " << sequence_path.string() << '\n';
+    if (tt_enabled) std::cout << "final TT: " << tt_path.string() << '\n';
     if (rzone_enabled) std::cout << "final RZone: " << rz_path.string() << '\n';
 
     if (command.verify_batch) {
         retained.reset();
         std::cout << "verifying batch proof sequence...\n";
-        const ProofTable table = ProofTable::load(tt_path);
+        const ProofTable table = tt_enabled
+            ? ProofTable::load(tt_path) : ProofTable::empty(settings.winning_tile);
         std::optional<RzProofTable> rzone_table;
         if (rzone_enabled) rzone_table = RzProofTable::load(rz_path);
         const ProofSequenceVerificationResult verification =
@@ -702,9 +676,9 @@ int main(int argc, char** argv)
                   << "persistent TT load: " << (settings.load_tt ? "enabled" : "disabled") << '\n'
                   << "persistent TT save: " << (settings.save_tt ? "enabled" : "disabled") << '\n'
                   << "TT file: " << settings.tt_path.string() << '\n'
-                  << "RZone mode: " << rzoneModeName(settings.rzone_mode) << '\n'
+                  << "RZone: " << (settings.use_rzone ? "enabled" : "disabled") << '\n'
                   << "RZone lookup policy: "
-                  << rzoneLookupPolicyName(settings.rzone_lookup_policy) << '\n'
+                  << rzoneLookupPolicyName(RZoneLookupPolicy::RadixTree) << '\n'
                   << "RZone symmetry lookup: "
                   << (settings.use_rzone_symmetry ? "enabled" : "disabled") << '\n'
                   << "RZone max cells: " << settings.rzone_max_cells << '\n'
@@ -713,8 +687,6 @@ int main(int argc, char** argv)
                   << "persistent RZone save: "
                   << (settings.save_rz ? "enabled" : "disabled") << '\n'
                   << "RZone file: " << settings.rz_path.string() << '\n'
-                  << "RZone shadow exact check: "
-                  << (settings.rzone_shadow_exact_check ? "enabled" : "disabled") << '\n'
                   << "RZone active pruning: "
                   << (settings.rzone_active_pruning ? "enabled" : "disabled") << '\n'
                   << "RZone trimming: "
@@ -812,11 +784,10 @@ int main(int argc, char** argv)
         metadata.node_limit = settings.node_limit;
         metadata.use_transposition_table = settings.use_transposition_table;
         metadata.use_tt_symmetry = settings.use_tt_symmetry;
-        metadata.rzone_mode = settings.rzone_mode;
-        metadata.rzone_lookup_policy = settings.rzone_lookup_policy;
+        metadata.rzone_mode = settings.use_rzone ? RZoneMode::Lookup : RZoneMode::Disabled;
+        metadata.rzone_lookup_policy = RZoneLookupPolicy::RadixTree;
         metadata.use_rzone_symmetry = settings.use_rzone_symmetry;
         metadata.rzone_max_cells = settings.rzone_max_cells;
-        metadata.rzone_shadow_exact_check = settings.rzone_shadow_exact_check;
         metadata.rzone_active_pruning = settings.rzone_active_pruning;
         metadata.rzone_trimming = settings.rzone_trimming;
         metadata.rzone_full_board_placement_fallback = settings.rzone_full_board_placement_fallback;
@@ -888,7 +859,7 @@ int main(int argc, char** argv)
                       << "environment TT entries: "
                       << result.statistics.environmentTtEntries() << '\n';
         }
-        if (settings.rzone_mode != RZoneMode::Disabled) {
+        if (settings.use_rzone) {
             const RZoneStatistics& rzone = result.statistics.rzone;
             std::cout << "RZone loaded certificates: " << rzone.loaded_certificates << '\n'
                       << "RZone full-board placement certificates: "

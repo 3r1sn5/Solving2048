@@ -6,6 +6,7 @@
 namespace solver2048 {
 
 struct ProofSequenceManifest {
+    // Empty when TT is disabled throughout the sequence; no tt= line is written.
     std::filesystem::path tt_path;
     std::filesystem::path rz_path;
     std::vector<std::filesystem::path> sgf_paths;

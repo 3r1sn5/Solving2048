@@ -79,7 +79,7 @@ void printHelp(const char* program)
         << "actions and AND/OR backup rules, builds a verified SGF source table,\n"
         << "and cross-checks every TT/RZone record without replaying a second DAG.\n"
         << "When --sgf is repeated, paths must be in chronological solve order.\n"
-        << "--tt may be omitted for a single SGF with transposition tables disabled.\n";
+        << "--tt may be omitted when transposition tables are disabled in every SGF.\n";
 }
 
 const char* proofOutcomeName(solver2048::Outcome outcome)
@@ -110,12 +110,17 @@ int main(int argc, char** argv)
         }
 
         const auto load_started = std::chrono::steady_clock::now();
-        if (command.tt_path.empty() &&
-            (!single_manifest || single_manifest->transposition_table)) {
-            throw std::invalid_argument("--tt is required for TT-enabled or multi-SGF proofs");
+        const auto first_manifest = single_manifest ? *single_manifest
+            : solver2048::readProofManifest(command.sgf_paths.front());
+        if (command.tt_path.empty()) {
+            for (const auto& path : command.sgf_paths) {
+                if (solver2048::readProofManifest(path).transposition_table) {
+                    throw std::invalid_argument("--tt is required for TT-enabled proofs");
+                }
+            }
         }
         const solver2048::ProofTable table = command.tt_path.empty()
-            ? solver2048::ProofTable::empty(single_manifest->winning_tile)
+            ? solver2048::ProofTable::empty(first_manifest.winning_tile)
             : solver2048::ProofTable::load(command.tt_path);
         const double tt_load_elapsed = std::chrono::duration<double>(
             std::chrono::steady_clock::now() - load_started).count();

@@ -68,9 +68,6 @@ Solver::Solver(const Game& game, SolverOptions options, ProgressCallback progres
     if (options_.use_tt_symmetry && !options_.use_transposition_table) {
         throw std::invalid_argument("TT symmetry requires the transposition table to be enabled");
     }
-    if (options_.rzone_shadow_exact_check && !options_.use_transposition_table) {
-        throw std::invalid_argument("RZone shadow exact check requires exact TT");
-    }
     if (options_.rzone_active_pruning && options_.rzone_mode != RZoneMode::Lookup) {
         throw std::invalid_argument("RZone active pruning requires lookup mode");
     }
@@ -181,30 +178,18 @@ void Solver::createTerminalRZone(Board board, TraceNode& trace)
     if (id) annotateRZone(trace, *id, false);
 }
 
-void Solver::validateRZoneAgainstExact(Board board, Phase phase) const
-{
-    if (!options_.rzone_shadow_exact_check) return;
-    const CanonicalBoard key = transpositionKey(board);
-    const auto& table = phase == Phase::Player ? player_tt_ : environment_tt_;
-    const auto found = table.find(key.board.raw);
-    if (found != table.end() && found->second.outcome != Outcome::Win) {
-        throw std::logic_error("RZone Win conflicts with exact TT outcome");
-    }
-}
-
 bool Solver::lookupRZone(Board board, Phase phase, TraceNode& trace)
 {
     if (options_.rzone_mode != RZoneMode::Lookup) return false;
     const std::optional<RZoneMatch> match = rzone_table_.lookup(board, phase);
     if (!match) return false;
-    resolveRZoneMatch(board, phase, *match, trace);
+    resolveRZoneMatch(phase, *match, trace);
     return true;
 }
 
 void Solver::resolveRZoneMatch(
-    Board board, Phase phase, const RZoneMatch& match, TraceNode& trace)
+    Phase phase, const RZoneMatch& match, TraceNode& trace)
 {
-    validateRZoneAgainstExact(board, phase);
     trace.outcome = Outcome::Win;
     trace.terminal_reason = TerminalReason::None;
     trace.solved_by = SolvedBy::RZoneTable;
@@ -588,7 +573,7 @@ Outcome Solver::solveEnvironment(Board afterstate, TraceNode& trace)
         Outcome child_outcome = Outcome::Unknown;
         if (options_.rzone_active_pruning && active_matches[index]) {
             assignTraceId(*child);
-            resolveRZoneMatch(placement.board, Phase::Player, *active_matches[index], *child);
+            resolveRZoneMatch(Phase::Player, *active_matches[index], *child);
             rzone_table_.recordActivePruningHit(Phase::Player, *active_matches[index]);
             active_pruning_hit_used = true;
             child_outcome = child->outcome;

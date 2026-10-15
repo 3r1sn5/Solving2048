@@ -1688,7 +1688,7 @@ SgfProofVerificationResult verifySgfAgainstPriorSources(
 
     bool artifact_binding_verified = false;
     if (exact_tt_binding) {
-        if (require_tt_binding && !manifest.hasArtifactBinding()) {
+        if (require_tt_binding && manifest.transposition_table && !manifest.hasArtifactBinding()) {
             fileFail(
                 sgf_path,
                 "the final SGF in a multi-opening proof must bind the final TT snapshot");
@@ -1884,6 +1884,7 @@ ProofSequenceVerificationResult verifySgfProofSequence(
 
     ProofSequenceVerificationResult sequence;
     sequence.openings.reserve(sgf_paths.size());
+    std::optional<bool> tt_enabled;
     std::unordered_set<std::string> unique_paths;
     for (std::size_t index = 0; index < sgf_paths.size(); ++index) {
         const std::string normalized_path =
@@ -1892,6 +1893,10 @@ ProofSequenceVerificationResult verifySgfProofSequence(
             fileFail(sgf_paths[index], "duplicate SGF in proof sequence");
         }
         const ProofManifest manifest = readProofManifest(sgf_paths[index]);
+        if (tt_enabled && *tt_enabled != manifest.transposition_table) {
+            fileFail(sgf_paths[index], "TT mode must be consistent across the proof sequence");
+        }
+        tt_enabled = manifest.transposition_table;
         const bool final_opening = index + 1 == sgf_paths.size();
         SgfProofVerificationResult result = verifySgfAgainstPriorSources(
             sgf_paths[index],

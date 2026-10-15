@@ -265,9 +265,6 @@ symmetry transform 與 certificate immutability 都屬於 correctness-critical c
 - 本專案希望把 RZone 作為主要 proof reuse 機制，Exact TT 作過渡期 fallback。
 - 長期希望評估 RZone 是否能涵蓋並整合 Exact TT。
 
-過渡期可以提供 debug-only shadow Exact lookup：RZone 宣稱 Win 時，如果同一完整盤面
-已有 Exact Loss，立即報錯。正常效能實驗可關閉 shadow lookup。
-
 
 10. 自然 DFS backpropagation 後的 RZone 更新
 --------------------------------------------
@@ -315,7 +312,7 @@ Correctness prototype 可先按 mask 分組：
 
 Lookup policy 可切換：
 
-    rzone_lookup_policy = full_scan | smallest_first
+    RZoneLookupPolicy::FullScan | SmallestFirst（僅供內部測試）
 
 - `full_scan`：依 cell count 走訪全部 distinct masks，再以 cells、depth、ID 選全域最佳，
   作為原始行為 baseline。
@@ -331,21 +328,19 @@ subset hash 或 inverted fact index。索引最佳化不可改變最後的 exact
 12. Config
 ----------
 
-建議以單一 mode 避免互相矛盾的 boolean 組合：
+一般執行只保留 RZone 開關：
 
-    rzone_mode = disabled | generate | lookup
-    rzone_lookup_policy = full_scan | smallest_first
+    use_rzone = true | false
 
-語意：
-
-- `disabled`：完全不生成或查詢 RZone，作為 Exact TT baseline。
-- `generate`：生成、one-step 驗證並統計 certificates，但不能用 RZone 改變 DFS。
-- `lookup`：RZone-first lookup，miss 後才查 Exact TT。
+- `true`：生成並查詢 RZone，查找方式固定使用 `radix_tree`。
+- `false`：不生成或查詢 RZone，也停用 RZone active pruning 與 snapshot 讀寫。
+- `rzone_mode` 與 `rzone_lookup_policy` 不再是 cfg 或 CLI 選項。
+- 內部 `RZoneMode::Generate` 與三種 `RZoneLookupPolicy` 保留供測試比較。
+- SGF 仍記錄實際 mode/policy，供驗證與 viewer 追溯。
 
 其他初期 config：
 
     rzone_max_cells = 16
-    rzone_shadow_exact_check = false
 
 RZone 只以 cell 數限制向上 propagation；certificate depth 保留作統計與同 cell 數時的
 選擇資訊，不作為推導上限。限制命中時只視為 RZone miss 或停止向上 propagation，不能
@@ -379,8 +374,6 @@ Lookup：
     rzone_hits
     rzone_partial_hits
     rzone_full_board_hits
-    rzone_shadow_exact_hits
-    rzone_shadow_exact_conflicts
     exact_tt_lookups_after_rzone_miss
     exact_tt_hits_after_rzone_miss
 
@@ -438,7 +431,6 @@ Step 3：RZone-first verified-certificate lookup
 - 在 Exact TT 前查詢 validated certificates。
 - Pattern match 後不 replay，直接回傳 Win。
 - RZone miss 才執行原本 Exact TT lookup。
-- 加入 optional shadow Exact consistency check。
 
 Step 4：效能與索引
 
@@ -475,13 +467,12 @@ Composition：
 
 Solver integration：
 
-13. `rzone_mode=disabled` 維持目前 baseline。
-14. `generate` 的 root outcome、expanded nodes、Exact TT hit/store 與 DFS trace 順序必須
+13. `use_rzone=false` 維持目前 baseline。
+14. 內部 `Generate` 的 root outcome、expanded nodes、Exact TT hit/store 與 DFS trace 順序必須
     和 disabled 相同，只允許新增 RZone annotations/statistics。
-15. `lookup` 與 baseline 的 root outcome 必須相同。
+15. `use_rzone=true` 與 baseline 的 root outcome 必須相同。
 16. 同時存在 RZone 與 Exact entry 時必須由 RZone-first 命中。
 17. RZone miss 時 Exact TT fallback 必須保持正常。
-18. Shadow mode 發現 RZone Win / Exact Loss 衝突時必須立即失敗。
 
 先以 winning tile 8 做完整 correctness regression，再以 16 評估 certificate coverage、
 lookup cost 與 expanded-node reduction。第一個版本不要求立即改善 target 8 時間；主要成功

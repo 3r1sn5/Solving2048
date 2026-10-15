@@ -831,11 +831,9 @@ std::string validConfigText()
         "load_tt=true\n"
         "save_tt=false\n"
         "tt_path=solver/tt/test-target16.tt\n"
-        "rzone_mode=lookup\n"
-        "rzone_lookup_policy=smallest_first\n"
+        "use_rzone=true\n"
         "use_rzone_symmetry=true\n"
         "rzone_max_cells=12\n"
-        "rzone_shadow_exact_check=false\n"
         "rzone_active_pruning=true\n"
         "load_rz=true\n"
         "save_rz=false\n"
@@ -862,11 +860,10 @@ void testSolverConfigParsingAndValidation()
     check(parsed.load_tt && !parsed.save_tt &&
               parsed.tt_path == "solver/tt/test-target16.tt",
           "persistent TT cfg parsing mismatch");
-    check(parsed.rzone_mode == solver2048::RZoneMode::Lookup &&
-              parsed.rzone_lookup_policy == RZoneLookupPolicy::SmallestFirst &&
+    check(parsed.use_rzone &&
               parsed.use_rzone_symmetry &&
               parsed.rzone_max_cells == 12 &&
-              !parsed.rzone_shadow_exact_check && parsed.rzone_active_pruning &&
+              parsed.rzone_active_pruning &&
               parsed.load_rz &&
               !parsed.save_rz && parsed.rz_path == "solver/rz/test-target16.rz",
           "RZone cfg parsing mismatch");
@@ -937,30 +934,21 @@ void testSolverConfigParsingAndValidation()
     checkThrows([&] { (void)solver2048::loadSolverConfig(unknown.path); },
                 "unknown cfg keys must be rejected");
 
-    std::string invalid_rzone_policy = validConfigText();
-    const std::string valid_policy = "rzone_lookup_policy=smallest_first";
-    std::string radix_config_text = validConfigText();
-    radix_config_text.replace(radix_config_text.find(valid_policy), valid_policy.size(),
-                              "rzone_lookup_policy=radix_tree");
-    TemporaryConfigFile radix_config(radix_config_text);
-    check(solver2048::loadSolverConfig(radix_config.path).rzone_lookup_policy ==
-              RZoneLookupPolicy::RadixTree,
-          "radix_tree lookup policy must parse from cfg");
-    invalid_rzone_policy.replace(
-        invalid_rzone_policy.find(valid_policy), valid_policy.size(),
-        "rzone_lookup_policy=all_matches");
-    TemporaryConfigFile invalid_policy(invalid_rzone_policy);
-    checkThrows([&] { (void)solver2048::loadSolverConfig(invalid_policy.path); },
-                "unknown RZone lookup policy must be rejected");
-
-    std::string invalid_active_mode = validConfigText();
-    const std::string lookup_mode = "rzone_mode=lookup";
-    invalid_active_mode.replace(
-        invalid_active_mode.find(lookup_mode), lookup_mode.size(),
-        "rzone_mode=generate");
-    TemporaryConfigFile active_mode_dependency(invalid_active_mode);
-    checkThrows([&] { (void)solver2048::loadSolverConfig(active_mode_dependency.path); },
-                "RZone active pruning outside lookup mode must be rejected in cfg");
+    for (const auto* obsolete : {"rzone_mode=lookup\n", "rzone_lookup_policy=radix_tree\n"}) {
+        TemporaryConfigFile removed_option(validConfigText() + obsolete);
+        checkThrows([&] { (void)solver2048::loadSolverConfig(removed_option.path); },
+                    "removed RZone mode/policy config keys must be rejected");
+    }
+    std::string invalid_rzone = validConfigText();
+    const std::string enabled_rzone = "use_rzone=true";
+    invalid_rzone.replace(invalid_rzone.find(enabled_rzone), enabled_rzone.size(),
+                         "use_rzone=lookup");
+    TemporaryConfigFile invalid_rzone_bool(invalid_rzone);
+    checkThrows([&] { (void)solver2048::loadSolverConfig(invalid_rzone_bool.path); },
+                "use_rzone must accept only boolean values");
+    TemporaryConfigFile duplicate_rzone(validConfigText() + "use_rzone=false\n");
+    checkThrows([&] { (void)solver2048::loadSolverConfig(duplicate_rzone.path); },
+                "duplicate use_rzone keys must be rejected");
 
     TemporaryConfigFile duplicate(validConfigText() + "winning_tile=8\n");
     checkThrows([&] { (void)solver2048::loadSolverConfig(duplicate.path); },
@@ -973,6 +961,10 @@ void testSolverConfigParsingAndValidation()
     TemporaryConfigFile dependency(invalid_dependency);
     checkThrows([&] { (void)solver2048::loadSolverConfig(dependency.path); },
                 "TT symmetry without exact TT must be rejected in cfg");
+    const SolverConfig no_tt_batch = solver2048::loadSolverConfig(dependency.path, false);
+    check(!no_tt_batch.use_transposition_table && !no_tt_batch.use_tt_symmetry &&
+              !no_tt_batch.load_tt && !no_tt_batch.save_tt && no_tt_batch.tt_path.empty(),
+          "batch TT master switch must disable TT options and its path");
 
     std::string invalid_persistence = validConfigText();
     invalid_persistence.replace(invalid_persistence.find(enabled), enabled.size(),
@@ -985,13 +977,16 @@ void testSolverConfigParsingAndValidation()
     checkThrows([&] { (void)solver2048::loadSolverConfig(persistence_dependency.path); },
                 "persistent TT load/save without exact TT must be rejected in cfg");
 
-    std::string invalid_rz_persistence = validConfigText();
-    invalid_rz_persistence.replace(
-        invalid_rz_persistence.find(lookup_mode), lookup_mode.size(),
-        "rzone_mode=disabled");
-    TemporaryConfigFile rz_persistence_dependency(invalid_rz_persistence);
-    checkThrows([&] { (void)solver2048::loadSolverConfig(rz_persistence_dependency.path); },
-                "persistent RZone load/save while RZone is disabled must be rejected in cfg");
+    std::string disabled_rzone_text = validConfigText();
+    disabled_rzone_text.replace(
+        disabled_rzone_text.find(enabled_rzone), enabled_rzone.size(), "use_rzone=false");
+    TemporaryConfigFile disabled_rzone(disabled_rzone_text);
+    for (const bool single_run : {false, true}) {
+        const auto config = solver2048::loadSolverConfig(disabled_rzone.path, single_run);
+        check(!config.use_rzone && !config.rzone_active_pruning &&
+                  !config.load_rz && !config.save_rz,
+              "disabling RZone must disable active pruning and snapshot IO");
+    }
 
     std::string duplicate_opening = validConfigText();
     const std::string opening = "opening=4@5, 2@0 # inline comment";
@@ -1428,6 +1423,12 @@ void testProofSequenceManifestRoundTrip()
     check(parsed.tt_path == expected.tt_path && parsed.rz_path == expected.rz_path &&
               parsed.sgf_paths == expected.sgf_paths,
           "proof sequence manifest paths or order changed during round trip");
+    expected.tt_path.clear();
+    solver2048::writeProofSequenceManifest(manifest_file.path, expected);
+    const auto rz_only = solver2048::readProofSequenceManifest(manifest_file.path);
+    check(rz_only.tt_path.empty() && rz_only.rz_path == expected.rz_path &&
+              rz_only.sgf_paths == expected.sgf_paths,
+          "RZone-only sequence must round trip without a TT path");
 }
 
 std::uint8_t readByte(const std::filesystem::path& path, std::uint64_t offset)

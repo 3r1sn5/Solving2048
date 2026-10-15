@@ -110,7 +110,6 @@ ProofSequenceManifest readProofSequenceManifest(
     }
     if (!input.eof()) fail(path, line_number, "failed while reading manifest");
     if (!has_version) fail(path, 0, "missing format_version");
-    if (!has_tt) fail(path, 0, "missing tt path");
     if (result.sgf_paths.empty()) fail(path, 0, "manifest contains no sgf paths");
     return result;
 }
@@ -119,9 +118,9 @@ void writeProofSequenceManifest(
     const std::filesystem::path& path,
     const ProofSequenceManifest& manifest)
 {
-    if (path.empty() || manifest.tt_path.empty() || manifest.sgf_paths.empty()) {
+    if (path.empty() || manifest.sgf_paths.empty()) {
         throw std::invalid_argument(
-            "proof sequence output, TT, and SGF paths must not be empty");
+            "proof sequence output and SGF paths must not be empty");
     }
     if (!path.parent_path().empty()) {
         std::error_code directory_error;
@@ -136,8 +135,10 @@ void writeProofSequenceManifest(
     try {
         std::ofstream output(temporary, std::ios::out | std::ios::trunc);
         if (!output) fail(temporary, 0, "cannot open temporary manifest");
-        output << "format_version=1\n"
-               << "tt=" << relativeForManifest(path, manifest.tt_path).string() << '\n';
+        output << "format_version=1\n";
+        if (!manifest.tt_path.empty()) {
+            output << "tt=" << relativeForManifest(path, manifest.tt_path).string() << '\n';
+        }
         if (!manifest.rz_path.empty()) {
             output << "rz=" << relativeForManifest(path, manifest.rz_path).string() << '\n';
         }

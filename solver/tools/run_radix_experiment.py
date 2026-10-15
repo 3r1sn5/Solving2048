@@ -31,7 +31,6 @@ def main():
     parser.add_argument('--model', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--target', type=int, required=True)
-    parser.add_argument('--policy', choices=['smallest_first', 'radix_tree'], required=True)
     parser.add_argument('--node-limit', type=int, default=0)
     parser.add_argument('--checker', type=Path)
     args = parser.parse_args()
@@ -39,13 +38,13 @@ def main():
     out.mkdir(parents=True, exist_ok=False)
     settings = dict(winning_tile=args.target, node_limit=args.node_limit, progress_interval=1000000,
                     use_transposition_table='true', use_tt_symmetry='true', load_tt='false', save_tt='true',
-                    tt_path=out/'proof.tt', rzone_mode='lookup', rzone_lookup_policy=args.policy,
-                    use_rzone_symmetry='true', rzone_max_cells=16, rzone_shadow_exact_check='false',
+                    tt_path=out/'proof.tt', use_rzone='true',
+                    use_rzone_symmetry='true', rzone_max_cells=16,
                     rzone_active_pruning='true', rzone_trimming='true', rzone_full_board_placement_fallback='true',
                     load_rz='false', save_rz='true', rz_path=out/'proof.rz', opening='2@0,2@1',
                     network='4x6patt', model_path=args.model.resolve(), sgf_path=out/'proof.sgf')
     (out/'solver.cfg').write_text(''.join(f'{k}={v}\n' for k,v in settings.items()))
-    state = dict(state='RUNNING', target=args.target, policy=args.policy, node_limit=args.node_limit,
+    state = dict(state='RUNNING', target=args.target, policy='radix_tree', node_limit=args.node_limit,
                  binary=str(args.binary.resolve()), binary_sha256=digest(args.binary),
                  model_sha256=digest(args.model), started_unix=time.time())
 
