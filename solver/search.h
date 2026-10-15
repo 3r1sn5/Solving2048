@@ -16,6 +16,7 @@
 namespace solver2048 {
 
 class TtFile;
+class CompactTrace;
 
 enum class Outcome {
     Win,
@@ -99,6 +100,9 @@ struct TraceNode {
 };
 
 struct SearchStatistics {
+    // History includes active-pruned leaves as well as visited search nodes.
+    std::uint64_t trace_nodes = 0;
+    std::uint64_t trace_storage_bytes = 0;
     // Nodes entered by the DFS control flow, including terminal, TT, RZone,
     // and node-limit leaves. Parent-level active-pruned proof leaves are not
     // visited search nodes even though they remain in the SGF trace.
@@ -156,8 +160,10 @@ struct SolverOptions {
 };
 
 struct SearchResult {
+    std::shared_ptr<const CompactTrace> compact_trace;
     Outcome outcome = Outcome::Unknown;
     SearchStatistics statistics;
+    // Root summary only. The complete history lives in compact_trace.
     std::unique_ptr<TraceNode> root;
     std::optional<Direction> root_action;
     std::optional<double> root_action_value;
@@ -223,6 +229,9 @@ private:
     SolverOptions options_;
     ProgressCallback progress_;
     RZoneTable rzone_table_;
+    // Moved to SearchResult when solve finishes, so retaining proof tables for
+    // the next opening cannot keep the previous opening's trace alive.
+    std::shared_ptr<CompactTrace> compact_trace_;
     SearchStatistics statistics_;
     std::uint64_t next_trace_id_ = 0;
     bool solve_started_ = false;

@@ -1,4 +1,5 @@
 #include "sgf.h"
+#include "compact_trace.h"
 #include "config.h"
 
 #include <fstream>
@@ -210,6 +211,29 @@ void writeNode(std::ostream& output, const TraceNode& node)
     }
 }
 
+// Iterative traversal needs only one sibling ID per active depth. Export never
+// reconstructs the complete object tree, even for very large histories.
+void writeCompactChildren(std::ostream& output, const CompactTrace& compact,
+                          std::uint64_t root_id)
+{
+    std::vector<std::uint64_t> siblings;
+    auto id = compact.firstChild(root_id);
+    while (id != 0) {
+        const TraceNode node = compact.decode(id);
+        if (!node.incoming_action) throw std::logic_error("compact child missing action");
+        const auto& action = *node.incoming_action;
+        output << "(;" << action.sgfPlayer() << '[' << action.sgfId() << "]C["
+               << SgfWriter::escapeValue(nodeComment(node, nullptr)) << ']';
+        siblings.push_back(compact.nextSibling(id));
+        id = compact.firstChild(id);
+        while (id == 0 && !siblings.empty()) {
+            output << ')';
+            id = siblings.back();
+            siblings.pop_back();
+        }
+    }
+}
+
 } // namespace
 
 std::string SgfWriter::escapeValue(const std::string& value)
@@ -226,6 +250,22 @@ std::string SgfWriter::escapeValue(const std::string& value)
 void SgfWriter::write(const std::filesystem::path& output_path,
                       const TraceNode& root,
                       const SgfMetadata& metadata)
+{
+    writeTrace(output_path, root, metadata, nullptr);
+}
+
+void SgfWriter::write(const std::filesystem::path& output_path,
+                      const SearchResult& result,
+                      const SgfMetadata& metadata)
+{
+    if (!result.root) throw std::invalid_argument("SGF result has no root");
+    writeTrace(output_path, *result.root, metadata, result.compact_trace.get());
+}
+
+void SgfWriter::writeTrace(const std::filesystem::path& output_path,
+                           const TraceNode& root,
+                           const SgfMetadata& metadata,
+                           const CompactTrace* compact)
 {
     if (output_path.empty()) throw std::invalid_argument("SGF output path cannot be empty");
     std::vector<SearchAction> opening_actions;
@@ -258,10 +298,14 @@ void SgfWriter::write(const std::filesystem::path& output_path,
                 output << "C[" << escapeValue(nodeComment(root, &metadata)) << ']';
             }
         }
-        for (const auto& child : root.children) {
-            output << '(';
-            writeNode(output, *child);
-            output << ')';
+        if (compact) {
+            writeCompactChildren(output, *compact, root.trace_id);
+        } else {
+            for (const auto& child : root.children) {
+                output << '(';
+                writeNode(output, *child);
+                output << ')';
+            }
         }
         output << ")\n";
         output.flush();

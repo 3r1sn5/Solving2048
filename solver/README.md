@@ -86,6 +86,34 @@ python3 solver/tools/run_rzone_baseline.py --trimming \
 
 ## Defaults and configuration
 
+The solver always stores the complete search history as compact in-memory
+records. Completed descendants are released as `TraceNode` objects; their
+metadata, action order, and parent/child relationships remain in fixed-size
+blocks. Optional fields occupy space only when present. Record offsets and
+links are 64-bit, including for unlimited searches. No environment variable or
+configuration switch is needed to enable this storage.
+
+SGF is written after search by traversing these records, without rebuilding the
+object tree. Its format and the proof checker are unchanged, and search does not
+spill history to disk or NAS. Batch runs release an opening's history after its
+SGF is written while keeping the TT/RZ proof tables for subsequent openings.
+Memory still grows with the number of history records; TT/RZ and the evaluator
+have separate memory costs.
+
+Progress reports include `trace_nodes` (including active-pruned leaves) and
+`trace_bytes` (allocated history payload/link blocks, excluding live DFS work
+objects and block-pointer arrays). These are not total process RSS. To measure
+peak process RSS with the current configuration and no node limit:
+
+```bash
+/usr/bin/time -v ./solver/solver2048 --config solver/solver.cfg --node-limit 0
+```
+
+For C++ callers, `SearchResult::root` is a summary with no descendant objects.
+Read the history through `SearchResult::compact_trace`, or export it with
+`SgfWriter::write(path, result, metadata)`. The `TraceNode` writer overload is
+for manually constructed trees.
+
 Create your local configuration from the versioned example (run from the
 repository root):
 

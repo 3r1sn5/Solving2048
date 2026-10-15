@@ -1,7 +1,9 @@
 #include "search.h"
+#include "compact_trace.h"
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <stdexcept>
 #include <unordered_set>
 #include <utility>
@@ -134,6 +136,7 @@ SearchResult Solver::solve()
     statistics_.player_tt_loaded_entries = player_tt_.size();
     statistics_.environment_tt_loaded_entries = environment_tt_.size();
     next_trace_id_ = 0;
+    compact_trace_ = std::make_shared<CompactTrace>();
     auto root = std::make_unique<TraceNode>();
     root->phase = Phase::Player;
     root->dfs_order = 0;
@@ -141,11 +144,17 @@ SearchResult Solver::solve()
     SearchResult result;
     result.outcome = solvePlayer(game_.fixedOpening(), *root);
     statistics_.rzone = rzone_table_.statistics();
-    result.statistics = statistics_;
     if (root->selected_action && root->selected_action->kind == SearchAction::Kind::Slide) {
         result.root_action = root->selected_action->direction;
         result.root_action_value = root->selected_action_value;
     }
+    compact_trace_->seal(*root);
+    // Restore the root's skipped-action summary, without expanding descendants.
+    *root = compact_trace_->decode(root->trace_id);
+    statistics_.trace_nodes = compact_trace_->nodes();
+    statistics_.trace_storage_bytes = compact_trace_->capacityBytes();
+    result.statistics = statistics_;
+    result.compact_trace = std::move(compact_trace_);
     result.root = std::move(root);
     solve_finished_ = true;
     return result;
@@ -253,7 +262,11 @@ void Solver::liftEnvironmentRZone(Board board, TraceNode& trace)
 void Solver::assignTraceId(TraceNode& trace)
 {
     if (trace.trace_id != 0) return;
+    if (next_trace_id_ == std::numeric_limits<std::uint64_t>::max()) {
+        throw std::overflow_error("trace ID space exhausted");
+    }
     trace.trace_id = ++next_trace_id_;
+    compact_trace_->allocate(trace.trace_id);
 }
 
 void Solver::visitedNode(Phase phase)
@@ -266,6 +279,8 @@ void Solver::visitedNode(Phase phase)
     if (progress_ && options_.progress_interval != 0 &&
         statistics_.combinedNodes() % options_.progress_interval == 0) {
         statistics_.rzone = rzone_table_.statistics();
+        statistics_.trace_nodes = compact_trace_->nodes();
+        statistics_.trace_storage_bytes = compact_trace_->capacityBytes();
         progress_(statistics_);
     }
 }
@@ -483,6 +498,7 @@ Outcome Solver::solvePlayer(Board board, TraceNode& trace)
         } else {
             child_outcome = solveEnvironment(action.slide.afterstate, *child);
         }
+        compact_trace_->seal(*child);
         trace.children.push_back(std::move(child));
 
         if (child_outcome == Outcome::Win) {
@@ -580,6 +596,7 @@ Outcome Solver::solveEnvironment(Board afterstate, TraceNode& trace)
         } else {
             child_outcome = solvePlayer(placement.board, *child);
         }
+        compact_trace_->seal(*child);
         trace.children.push_back(std::move(child));
         const TraceNode& resolved_child = *trace.children.back();
 

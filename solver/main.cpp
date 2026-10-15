@@ -497,6 +497,8 @@ int runBatch(const CommandLine& command)
                           << " visited=" << statistics.combinedNodes()
                           << " tt_hits=" << statistics.ttHits()
                           << " rzone_hits=" << statistics.rzone.hits()
+                          << " trace_nodes=" << statistics.trace_nodes
+                          << " trace_bytes=" << statistics.trace_storage_bytes
                           << " elapsed=" << std::fixed << std::setprecision(3)
                           << elapsed << "s\n";
             });
@@ -567,12 +569,14 @@ int runBatch(const CommandLine& command)
             rz_path,
             tt_summary,
             rz_summary);
-        SgfWriter::write(sgf_path, *result.root, metadata);
+        SgfWriter::write(sgf_path, result, metadata);
 
         status << "opening=" << index + 1
                << " spec=" << formatOpening(opening)
                << " outcome=" << outcomeName(result.outcome)
                << " visited=" << result.statistics.combinedNodes()
+               << " trace_nodes=" << result.statistics.trace_nodes
+               << " trace_bytes=" << result.statistics.trace_storage_bytes
                << " player_tt_entries=" << result.statistics.playerTtEntries()
                << " environment_tt_entries="
                << result.statistics.environmentTtEntries()
@@ -585,6 +589,8 @@ int runBatch(const CommandLine& command)
         std::cout << "batch result " << index + 1 << ": "
                   << outcomeName(result.outcome)
                   << ", visited=" << result.statistics.combinedNodes()
+                  << ", trace_nodes=" << result.statistics.trace_nodes
+                  << ", trace_bytes=" << result.statistics.trace_storage_bytes
                   << ", new_tt=" << result.statistics.ttStores()
                   << ", persistent_tt_hits="
                   << result.statistics.player_persistent_tt_hits +
@@ -669,6 +675,7 @@ int main(int argc, char** argv)
         std::cout << "opening: " << formatOpening(settings.opening) << '\n'
                   << "winning tile: " << settings.winning_tile << '\n'
                   << "node limit: " << settings.node_limit << " (0 = unlimited)\n"
+                  << "trace storage: packed (64-bit links, in memory)\n"
                   << "progress interval: " << settings.progress_interval << '\n'
                   << "transposition table: " << (settings.use_transposition_table ? "enabled" : "disabled") << '\n'
                   << "TT symmetry canonicalization: "
@@ -705,6 +712,8 @@ int main(int argc, char** argv)
                       << " environment_visited=" << statistics.environment_nodes
                       << " tt_hits=" << statistics.ttHits()
                       << " rzone_hits=" << statistics.rzone.hits()
+                      << " trace_nodes=" << statistics.trace_nodes
+                      << " trace_bytes=" << statistics.trace_storage_bytes
                       << " elapsed=" << std::fixed << std::setprecision(3) << elapsed << "s\n";
         });
         std::optional<TtFileSummary> loaded_tt;
@@ -816,10 +825,12 @@ int main(int argc, char** argv)
         metadata.statistics = result.statistics;
         metadata.config_path = command.config_path;
         metadata.opening = settings.opening;
-        SgfWriter::write(settings.sgf_path, *result.root, metadata);
+        SgfWriter::write(settings.sgf_path, result, metadata);
 
         std::cout << std::fixed << std::setprecision(6)
                   << "root result: " << outcomeName(result.outcome) << '\n';
+        std::cout << "trace retained nodes: " << result.statistics.trace_nodes << '\n'
+                  << "trace storage bytes: " << result.statistics.trace_storage_bytes << '\n';
         if (result.outcome == Outcome::Win && result.root_action) {
             std::cout << "root action: " << directionName(*result.root_action) << '\n';
             if (result.root_action_value) {

@@ -47,10 +47,20 @@ struct SgfMetadata {
 
 class SgfWriter {
 public:
+    // Solver results must use this overload to include the compact history.
+    static void write(const std::filesystem::path& output_path,
+                      const SearchResult& result,
+                      const SgfMetadata& metadata);
+    // For explicitly constructed tree fixtures.
     static void write(const std::filesystem::path& output_path,
                       const TraceNode& root,
                       const SgfMetadata& metadata);
     static std::string escapeValue(const std::string& value);
+private:
+    static void writeTrace(const std::filesystem::path& output_path,
+                           const TraceNode& root,
+                           const SgfMetadata& metadata,
+                           const CompactTrace* compact);
 };
 
 } // namespace solver2048

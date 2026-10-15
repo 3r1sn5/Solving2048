@@ -1,4 +1,5 @@
 #include "config.h"
+#include "compact_trace.h"
 #include "game_api.h"
 #include "proof_checker.h"
 #include "proof_sequence.h"
@@ -74,6 +75,24 @@ void check(bool condition, const std::string& message)
 }
 
 std::string readFile(const std::filesystem::path& path);
+
+// Test-only expansion for existing structural assertions. Production keeps only
+// the root summary and writes SGF directly from the compact store.
+SearchResult expandTraceForInspection(SearchResult result)
+{
+    check(result.compact_trace != nullptr, "solver must return compact history");
+    check(result.root->children.empty(), "solver must not retain the object tree");
+    const auto& store = *result.compact_trace;
+    auto expand = [&](auto&& self, std::uint64_t id) -> std::unique_ptr<TraceNode> {
+        auto node = std::make_unique<TraceNode>(store.decode(id));
+        for (auto child = store.firstChild(id); child; child = store.nextSibling(child)) {
+            node->children.push_back(self(self, child));
+        }
+        return node;
+    };
+    result.root = expand(expand, result.root->trace_id);
+    return result;
+}
 
 void checkNear(double actual, double expected, double tolerance, const std::string& message)
 {
@@ -503,12 +522,12 @@ void testRZoneActivePruningCoversEnvironmentSiblings()
     SolverOptions baseline_options;
     baseline_options.winning_tile = 8;
     baseline_options.rzone_mode = RZoneMode::Lookup;
-    SearchResult baseline = Solver(baseline_game, baseline_options).solve();
+    SearchResult baseline = expandTraceForInspection(Solver(baseline_game, baseline_options).solve());
 
     FakeGame active_game = make_game();
     SolverOptions active_options = baseline_options;
     active_options.rzone_active_pruning = true;
-    SearchResult active = Solver(active_game, active_options).solve();
+    SearchResult active = expandTraceForInspection(Solver(active_game, active_options).solve());
 
     if (baseline.outcome != Outcome::Win || active.outcome != baseline.outcome ||
         active.root_action != baseline.root_action) {
@@ -623,7 +642,7 @@ void testPlayerOrUnknownWinAndSkipped()
     game.values = {{10, 30.0}, {11, 20.0}, {12, 10.0}};
     game.winning_states.insert(11);
 
-    SearchResult result = Solver(game, SolverOptions{8, 1, 0}).solve();
+    SearchResult result = expandTraceForInspection(Solver(game, SolverOptions{8, 1, 0}).solve());
 
     check(result.outcome == Outcome::Win, "Player OR must find a Win after an Unknown child");
     check(result.root_action == Direction::Right, "Player OR selected the wrong winning action");
@@ -670,12 +689,12 @@ void testEnvironmentAndAllWin()
     SolverOptions options;
     options.progress_interval = 2;
     std::vector<std::uint64_t> progress_counts;
-    SearchResult result = Solver(
+    SearchResult result = expandTraceForInspection(Solver(
         game,
         options,
         [&](const solver2048::SearchStatistics& statistics) {
             progress_counts.push_back(statistics.combinedNodes());
-        }).solve();
+        }).solve());
 
     check(result.outcome == Outcome::Win, "Environment AND must be Win when every placement is Win");
     check(result.statistics.player_nodes == 4 && result.statistics.environment_nodes == 1 &&
@@ -704,7 +723,7 @@ void testEnvironmentAndLossShortCircuit()
     };
     game.winning_states.insert(20);
 
-    SearchResult result = Solver(game, SolverOptions{}).solve();
+    SearchResult result = expandTraceForInspection(Solver(game, SolverOptions{}).solve());
 
     check(result.outcome == Outcome::Loss,
           "one losing placement must make Environment AND a Player Loss");
@@ -737,7 +756,7 @@ void testEnvironmentUnknownIsNotShortCircuit()
     };
     game.winning_states = {20, 22};
 
-    SearchResult result = Solver(game, SolverOptions{8, 2, 0}).solve();
+    SearchResult result = expandTraceForInspection(Solver(game, SolverOptions{8, 2, 0}).solve());
 
     check(result.outcome == Outcome::Unknown,
           "Environment with Win, Unknown, Win children must be Unknown");
@@ -774,7 +793,7 @@ void testActionValueOrderingAndDirectionTieBreak()
     game.placements[12] = {placement(0, 2, 22)};
     game.placements[13] = {placement(0, 2, 23)};
 
-    SearchResult result = Solver(game, SolverOptions{}).solve();
+    SearchResult result = expandTraceForInspection(Solver(game, SolverOptions{}).solve());
 
     check(result.outcome == Outcome::Loss, "ordering graph should visit all four losing actions");
     check(result.root->children.size() == 4, "ordering graph did not visit every Player action");
@@ -1074,7 +1093,7 @@ void testPlayerSymmetryTranspositionHitAndWitnessMapping()
     game.values[rotated_win.raw] = 7.0;
     game.winning_states = {source_win.raw, rotated_win.raw};
 
-    SearchResult result = Solver(game, SolverOptions{8, 0, 0, true, true}).solve();
+    SearchResult result = expandTraceForInspection(Solver(game, SolverOptions{8, 0, 0, true, true}).solve());
     check(result.outcome == Outcome::Win,
           "symmetry-equivalent winning Player states must keep Environment AND winning");
     check(result.statistics.player_tt_hits == 1 &&
@@ -1119,7 +1138,7 @@ void testEnvironmentSymmetryWinTranspositionHit()
     game.placements[source.raw] = {placement(source_position, 2, 30)};
     game.winning_states.insert(30);
 
-    SearchResult result = Solver(game, SolverOptions{8, 0, 0, true, true}).solve();
+    SearchResult result = expandTraceForInspection(Solver(game, SolverOptions{8, 0, 0, true, true}).solve());
     check(result.outcome == Outcome::Win && result.root_action == Direction::Up,
           "symmetry-equivalent winning Environment states must preserve root Win");
     check(result.statistics.environment_tt_hits == 1 &&
@@ -1154,7 +1173,7 @@ void testNoCacheExpandsRepeatedStates()
     game.values[10] = 7.0;
     game.placements[10] = {placement(0, 2, 20)};
 
-    SearchResult result = Solver(game, SolverOptions{8, 0, 0, false}).solve();
+    SearchResult result = expandTraceForInspection(Solver(game, SolverOptions{8, 0, 0, false}).solve());
 
     check(result.outcome == Outcome::Loss, "repeated-state graph should be Loss");
     check(result.statistics.player_nodes == 3 &&
@@ -1195,7 +1214,7 @@ void testPlayerTranspositionHit()
     // The duplicate is reached exactly when the combined budget is exhausted.
     // A TT lookup must happen before the node-limit check, so the cached exact
     // result remains usable before the visited-node limit check.
-    SearchResult result = Solver(game, SolverOptions{8, 3, 0, true}).solve();
+    SearchResult result = expandTraceForInspection(Solver(game, SolverOptions{8, 3, 0, true}).solve());
 
     check(result.outcome == Outcome::Win,
           "two identical winning Player states should make Environment AND a Win");
@@ -1258,10 +1277,10 @@ FakeGame environmentTranspositionGame()
 void testLossOutcomesAreNotCached()
 {
     FakeGame baseline_game = environmentTranspositionGame();
-    SearchResult baseline = Solver(baseline_game, SolverOptions{8, 0, 0, false}).solve();
+    SearchResult baseline = expandTraceForInspection(Solver(baseline_game, SolverOptions{8, 0, 0, false}).solve());
 
     FakeGame tt_game = environmentTranspositionGame();
-    SearchResult cached = Solver(tt_game, SolverOptions{8, 0, 0, true}).solve();
+    SearchResult cached = expandTraceForInspection(Solver(tt_game, SolverOptions{8, 0, 0, true}).solve());
 
     check(baseline.outcome == Outcome::Win && cached.outcome == baseline.outcome,
           "TT on/off must produce the same root outcome");
@@ -1308,7 +1327,7 @@ void testUnknownOutcomesAreNotCached()
     game.values[10] = 1.0;
     game.placements[10] = {placement(0, 2, 20)};
 
-    SearchResult result = Solver(game, SolverOptions{8, 2, 0, true}).solve();
+    SearchResult result = expandTraceForInspection(Solver(game, SolverOptions{8, 2, 0, true}).solve());
 
     check(result.outcome == Outcome::Unknown,
           "node-limited repeated state must remain Unknown with TT enabled");
@@ -1348,7 +1367,7 @@ void testNodeLimitReturnsUnknownForEveryAttemptedChild()
     };
     game.values = {{10, 2.0}, {11, 1.0}};
 
-    SearchResult result = Solver(game, SolverOptions{8, 1, 0}).solve();
+    SearchResult result = expandTraceForInspection(Solver(game, SolverOptions{8, 1, 0}).solve());
 
     check(result.outcome == Outcome::Unknown, "node limit must return Unknown, not Loss");
     check(result.statistics.combinedNodes() == 3,
@@ -1717,13 +1736,13 @@ void testRZoneIndexCrossOpeningHandoff()
     {
         MechanicsGame first_game(opening);
         Solver first(first_game, options);
-        const auto result = first.solve();
+        const auto result = expandTraceForInspection(first.solve());
         check(result.outcome == Outcome::Win, "handoff fixture must prove the first opening");
         masks = result.statistics.rzone.masks_indexed;
         expected = RzFile::summarize(first);
         next.adoptPersistentProofs(first);
     }
-    const auto result = next.solve();
+    const auto result = expandTraceForInspection(next.solve());
     check(result.outcome == Outcome::Win && result.statistics.combinedNodes() == 1 &&
               result.root->solved_by == SolvedBy::RZoneTable &&
               result.statistics.rzone.loaded_certificates == expected.record_count &&
@@ -2061,7 +2080,7 @@ void testPersistentTtRoundTripAndCrossOpeningReuse()
     first_game.winning_states.insert(21);
 
     Solver first_solver(first_game, options);
-    const SearchResult first = first_solver.solve();
+    const SearchResult first = expandTraceForInspection(first_solver.solve());
     check(first.outcome == Outcome::Win && first.root_action == Direction::Right,
           "first persistent-TT fixture must prove Win after rejecting a losing action");
     check(first.statistics.player_tt_stores == 1 &&
@@ -2090,7 +2109,7 @@ void testPersistentTtRoundTripAndCrossOpeningReuse()
     FakeGame adopted_game = second_game;
     Solver adopted_solver(adopted_game, options);
     adopted_solver.adoptPersistentProofs(first_solver);
-    const SearchResult adopted = adopted_solver.solve();
+    const SearchResult adopted = expandTraceForInspection(adopted_solver.solve());
     check(adopted.outcome == Outcome::Win &&
               adopted.statistics.player_tt_loaded_entries == 1 &&
               adopted.statistics.environment_tt_loaded_entries == 1 &&
@@ -2102,7 +2121,7 @@ void testPersistentTtRoundTripAndCrossOpeningReuse()
     check(loaded.player_entries == 1 && loaded.environment_entries == 1 &&
               loaded.payload_checksum == first_saved.payload_checksum,
           "persistent TT round trip changed counts or checksum");
-    const SearchResult second = second_solver.solve();
+    const SearchResult second = expandTraceForInspection(second_solver.solve());
     check(second.outcome == Outcome::Win && second.root_action == Direction::Down,
           "second opening must reuse the first opening proof and remain Win");
     check(second.statistics.player_tt_loaded_entries == 1 &&
@@ -2129,7 +2148,7 @@ void testPersistentTtRoundTripAndCrossOpeningReuse()
     FakeGame third_game = second_game;
     Solver third_solver(third_game, options);
     (void)TtFile::load(temporary.path, third_solver);
-    const SearchResult third = third_solver.solve();
+    const SearchResult third = expandTraceForInspection(third_solver.solve());
     check(third.outcome == Outcome::Win && third.root_action == Direction::Down &&
               third.root_action_value == std::optional<double>(10.0),
           "merged persistent TT must restore a root witness and action value");
@@ -2149,7 +2168,7 @@ void testPersistentTtRejectsIncompatibleAndCorruptFiles()
     game.winning_states.insert(10);
 
     Solver source(game, options);
-    const SearchResult source_result = source.solve();
+    const SearchResult source_result = expandTraceForInspection(source.solve());
     check(source_result.outcome == Outcome::Win, "corruption fixture must be a proven Win");
     TemporaryTtFile temporary;
     const TtFileSummary saved = TtFile::save(temporary.path, source);
@@ -2252,7 +2271,7 @@ void testPersistentSymmetryWitnessMapping()
     source_game.values[source_win.raw] = 5.0;
     source_game.winning_states.insert(source_win.raw);
     Solver source_solver(source_game, options);
-    const SearchResult source_result = source_solver.solve();
+    const SearchResult source_result = expandTraceForInspection(source_solver.solve());
     check(source_result.outcome == Outcome::Win && source_result.root_action == Direction::Up,
           "persistent symmetry source fixture must prove its slide witness");
 
@@ -2264,7 +2283,7 @@ void testPersistentSymmetryWitnessMapping()
     current_game.values[current_win.raw] = 7.0;
     Solver current_solver(current_game, options);
     (void)TtFile::load(temporary.path, current_solver);
-    const SearchResult current_result = current_solver.solve();
+    const SearchResult current_result = expandTraceForInspection(current_solver.solve());
     check(current_result.outcome == Outcome::Win &&
               current_result.root_action == current_direction &&
               current_result.root_action_value == std::optional<double>(11.0),
@@ -2346,7 +2365,7 @@ void testRealGameApiAndThreeNodeSearch()
           "Environment placement order must skip occupied positions 12 and 13");
 
     {
-        SearchResult result = Solver(game, SolverOptions{8, 3, 0, false}).solve();
+        SearchResult result = expandTraceForInspection(Solver(game, SolverOptions{8, 3, 0, false}).solve());
         check(result.outcome == Outcome::Unknown, "three-node real search must be Unknown");
         check(result.statistics.player_actions == 7, "three-node search player_actions must be 7");
         check(result.statistics.placement_actions == 28,
@@ -2364,7 +2383,7 @@ void testRealGameApiAndThreeNodeSearch()
     // Keep this integration solve in the one GameApi test: the legacy N-tuple
     // network is initialized process-wide, and the preceding limited trace has
     // left scope before this complete target-8 proof is retained.
-    SearchResult tt_result = Solver(game, SolverOptions{8, 0, 0, true}).solve();
+    SearchResult tt_result = expandTraceForInspection(Solver(game, SolverOptions{8, 0, 0, true}).solve());
     check(tt_result.outcome == Outcome::Win,
           "complete target-8 TT search must prove a guaranteed Win");
     check(tt_result.root_action == Direction::Down,
@@ -2382,7 +2401,7 @@ void testRealGameApiAndThreeNodeSearch()
     checkTraceIdsAreDfsDiscoveryOrder(*tt_result.root);
 
     Solver symmetry_solver(game, SolverOptions{8, 0, 0, true, true});
-    SearchResult symmetry_result = symmetry_solver.solve();
+    SearchResult symmetry_result = expandTraceForInspection(symmetry_solver.solve());
     check(symmetry_result.outcome == tt_result.outcome &&
               symmetry_result.root_action == tt_result.root_action &&
               symmetry_result.root_action_value == tt_result.root_action_value,
@@ -2406,7 +2425,7 @@ void testRealGameApiAndThreeNodeSearch()
 
     SolverOptions generation_options{8, 0, 0, true, true};
     generation_options.rzone_mode = RZoneMode::Generate;
-    SearchResult generation_result = Solver(game, generation_options).solve();
+    SearchResult generation_result = expandTraceForInspection(Solver(game, generation_options).solve());
     check(generation_result.outcome == symmetry_result.outcome &&
               generation_result.root_action == symmetry_result.root_action &&
               generation_result.root_action_value == symmetry_result.root_action_value,
@@ -2428,7 +2447,7 @@ void testRealGameApiAndThreeNodeSearch()
     SolverOptions rzone_options{8, 0, 0, true, true};
     rzone_options.rzone_mode = RZoneMode::Lookup;
     Solver rzone_solver(game, rzone_options);
-    SearchResult rzone_result = rzone_solver.solve();
+    SearchResult rzone_result = expandTraceForInspection(rzone_solver.solve());
     check(rzone_result.outcome == symmetry_result.outcome &&
               rzone_result.root_action == symmetry_result.root_action &&
               rzone_result.root_action_value == symmetry_result.root_action_value,
@@ -2447,7 +2466,7 @@ void testRealGameApiAndThreeNodeSearch()
 
     SolverOptions smallest_first_options = rzone_options;
     smallest_first_options.rzone_lookup_policy = RZoneLookupPolicy::SmallestFirst;
-    SearchResult smallest_first_result = Solver(game, smallest_first_options).solve();
+    SearchResult smallest_first_result = expandTraceForInspection(Solver(game, smallest_first_options).solve());
     check(smallest_first_result.outcome == symmetry_result.outcome &&
               smallest_first_result.root_action == symmetry_result.root_action &&
               smallest_first_result.root_action_value == symmetry_result.root_action_value,
@@ -2462,7 +2481,7 @@ void testRealGameApiAndThreeNodeSearch()
     SolverOptions symmetry_rzone_options = smallest_first_options;
     symmetry_rzone_options.use_rzone_symmetry = true;
     Solver symmetry_rzone_solver(game, symmetry_rzone_options);
-    SearchResult symmetry_rzone_result = symmetry_rzone_solver.solve();
+    SearchResult symmetry_rzone_result = expandTraceForInspection(symmetry_rzone_solver.solve());
     check(symmetry_rzone_result.outcome == symmetry_result.outcome &&
               symmetry_rzone_result.root_action == symmetry_result.root_action &&
               symmetry_rzone_result.root_action_value == symmetry_result.root_action_value,
@@ -2480,11 +2499,11 @@ void testRealGameApiAndThreeNodeSearch()
         SolverOptions hash_options = symmetry_rzone_options;
         hash_options.rzone_active_pruning = active;
         Solver hash_solver(game, hash_options);
-        const auto hash_result = hash_solver.solve();
+        const auto hash_result = expandTraceForInspection(hash_solver.solve());
         SolverOptions radix_options = hash_options;
         radix_options.rzone_lookup_policy = RZoneLookupPolicy::RadixTree;
         Solver radix_solver(game, radix_options);
-        const auto radix_result = radix_solver.solve();
+        const auto radix_result = expandTraceForInspection(radix_solver.solve());
         check(radix_result.outcome == hash_result.outcome &&
                   radix_result.root_action == hash_result.root_action &&
                   radix_result.statistics.combinedNodes() == hash_result.statistics.combinedNodes() &&
@@ -2511,7 +2530,7 @@ void testRealGameApiAndThreeNodeSearch()
     SolverOptions active_rzone_options = symmetry_rzone_options;
     active_rzone_options.rzone_active_pruning = true;
     Solver active_rzone_solver(game, active_rzone_options);
-    SearchResult active_rzone_result = active_rzone_solver.solve();
+    SearchResult active_rzone_result = expandTraceForInspection(active_rzone_solver.solve());
     check(active_rzone_result.outcome == symmetry_rzone_result.outcome &&
               active_rzone_result.root_action == symmetry_rzone_result.root_action &&
               active_rzone_result.root_action_value == symmetry_rzone_result.root_action_value,
@@ -2536,7 +2555,7 @@ void testRealGameApiAndThreeNodeSearch()
                 options.rzone_trimming = trimming;
                 options.rzone_full_board_placement_fallback = fallback;
                 Solver toggled(game, options);
-                const auto result = toggled.solve();
+                const auto result = expandTraceForInspection(toggled.solve());
                 const auto& rz = result.statistics.rzone;
                 check(result.outcome == symmetry_rzone_result.outcome &&
                           result.root_action == symmetry_rzone_result.root_action,
@@ -2773,7 +2792,7 @@ void testRealGameApiAndThreeNodeSearch()
     SolverOptions trivial_rzone_options{8, 0, 0, true, false};
     trivial_rzone_options.rzone_mode = RZoneMode::Lookup;
     Solver trivial_rzone_solver(trivial_rzone_game, trivial_rzone_options);
-    SearchResult trivial_rzone_result = trivial_rzone_solver.solve();
+    SearchResult trivial_rzone_result = expandTraceForInspection(trivial_rzone_solver.solve());
     check(trivial_rzone_result.outcome == Outcome::Win &&
               trivial_rzone_result.root->rzone_certificate_id.has_value(),
           "trivial target-8 root must produce an RZone certificate");
@@ -3237,11 +3256,134 @@ void testSgfActionEncodingEscapingAndOrder()
           "successful SGF publication must not leave a temporary file");
 }
 
+void testCompactTraceRoundTrip()
+{
+    solver2048::CompactTrace store;
+    static_assert(sizeof(store.firstChild(1)) == 8 && sizeof(store.nextSibling(1)) == 8,
+                  "long searches require 64-bit trace links");
+    // Cross both link and payload block boundaries, varying absent/present fields
+    // independently and checking full-width IDs, values, and skipped-action order.
+    for (unsigned i = 1; i <= 12000; ++i) {
+        TraceNode node;
+        node.trace_id = i;
+        store.allocate(i);
+        node.phase = static_cast<Phase>(i % 2);
+        node.outcome = static_cast<Outcome>(i % 3);
+        node.terminal_reason = static_cast<TerminalReason>(i % 5);
+        node.solved_by = static_cast<SolvedBy>(i % 6);
+        node.expanded = i & 1;
+        node.tt_hit = i & 2;
+        node.tt_persistent_hit = i & 4;
+        node.tt_symmetry_hit = i & 8;
+        node.rzone_hit = i & 16;
+        node.rzone_symmetry_hit = i & 32;
+        node.dfs_order = i % 32;
+        node.children_total = i % 33;
+        if (i & 1) node.tt_source_trace_id = UINT64_MAX - i;
+        if (i & 2) node.tt_key = 0xfedcba9876543210ULL + i;
+        if (i & 4) node.tt_transform = i % 8;
+        if (i & 8) node.rzone_transform = i % 8;
+        if (i & 16) node.rzone_certificate_id = UINT32_MAX - i;
+        if (i & 32) node.rzone_kind = static_cast<RZoneStepKind>(i % 4);
+        if (i & 64) node.rzone_mask = static_cast<std::uint16_t>(i * 11);
+        if (i & 128) node.rzone_masked_board = 0xffff123400001234ULL;
+        if (i & 256) node.rzone_depth = i + 10;
+        if (i & 512) node.incoming_action = SearchAction::placement(i % 16, i % 2 ? 2 : 4);
+        if (i & 1024) node.reward = -static_cast<int>(i);
+        if (i & 2048) node.afterstate_value = -static_cast<double>(i) * 0.125;
+        if (i & 4096) node.action_value = i * 0.625;
+        if (i & 8192) node.selected_action = SearchAction::slide(static_cast<Direction>(i % 4));
+        if (i % 3) node.selected_action_value = i * 0.375;
+        std::vector<int> skipped;
+        for (unsigned j = 0; j < i % 33; ++j) {
+            auto action = SearchAction::placement((j * 7) % 16, j % 2 ? 2 : 4);
+            node.skipped_actions.push_back(action);
+            skipped.push_back(action.sgfId());
+        }
+        store.seal(node);
+        auto decoded = store.decode(i);
+#define TRACE_EQUAL(field) check(node.field == decoded.field, "compact round trip: " #field)
+        TRACE_EQUAL(trace_id); TRACE_EQUAL(phase); TRACE_EQUAL(outcome);
+        TRACE_EQUAL(terminal_reason); TRACE_EQUAL(solved_by); TRACE_EQUAL(expanded);
+        TRACE_EQUAL(tt_hit); TRACE_EQUAL(tt_persistent_hit); TRACE_EQUAL(tt_symmetry_hit);
+        TRACE_EQUAL(rzone_hit); TRACE_EQUAL(rzone_symmetry_hit); TRACE_EQUAL(dfs_order);
+        TRACE_EQUAL(children_total); TRACE_EQUAL(tt_source_trace_id); TRACE_EQUAL(tt_key);
+        TRACE_EQUAL(tt_transform); TRACE_EQUAL(rzone_transform); TRACE_EQUAL(rzone_certificate_id);
+        TRACE_EQUAL(rzone_kind); TRACE_EQUAL(rzone_mask); TRACE_EQUAL(rzone_masked_board);
+        TRACE_EQUAL(rzone_depth); TRACE_EQUAL(reward); TRACE_EQUAL(afterstate_value);
+        TRACE_EQUAL(action_value); TRACE_EQUAL(selected_action_value);
+#undef TRACE_EQUAL
+        for (const auto& pair : {std::make_pair(node.incoming_action, decoded.incoming_action),
+                                 std::make_pair(node.selected_action, decoded.selected_action)}) {
+            check(bool(pair.first) == bool(pair.second), "compact action presence changed");
+            if (pair.first) check(pair.first->sgfId() == pair.second->sgfId(), "compact action changed");
+        }
+        check(skipped.size() == decoded.skipped_actions.size(), "compact skipped count changed");
+        for (unsigned j = 0; j < skipped.size(); ++j) {
+            check(skipped[j] == decoded.skipped_actions[j].sgfId(), "compact skipped order changed");
+        }
+        checkThrows([&] { store.seal(node); }, "double sealing must fail");
+    }
+    for (unsigned i = 1; i <= 12000; ++i) {
+        check(store.decode(i).trace_id == i, "block growth invalidated an earlier record");
+    }
+    checkThrows([&] { store.allocate(UINT64_MAX); }, "nonsequential allocation must fail");
+    checkThrows([&] { store.decode(0); }, "sentinel must not decode");
+    store.allocate(12001);
+    checkThrows([&] { store.decode(12001); }, "unsealed node must not decode");
+}
+
+void testCompactTraceOwnershipAndExport()
+{
+    FakeGame game;
+    game.slides[1] = {slide(Direction::Up, 10), slide(Direction::Right, 11)};
+    game.values[10] = 2;
+    game.values[11] = 1;
+    game.placements[10] = {placement(0, 2, 20), placement(0, 4, 21)};
+    game.winning_states = {20, 21};
+    SolverOptions options;
+    options.progress_interval = 1;
+    std::uint64_t last_trace_count = 0;
+    Solver solver(game, options, [&](const solver2048::SearchStatistics& statistics) {
+        check(statistics.trace_nodes >= last_trace_count && statistics.trace_storage_bytes > 0,
+              "progress must report allocated compact history");
+        last_trace_count = statistics.trace_nodes;
+    });
+    std::weak_ptr<const solver2048::CompactTrace> lifetime;
+    {
+        auto result = solver.solve();
+        lifetime = result.compact_trace;
+        check(result.root->children.empty(), "completed solver retained descendant objects");
+        check(result.statistics.trace_nodes == 4 && result.compact_trace->nodes() == 4,
+              "compact trace lost a visited node");
+        check(result.root->skipped_actions.size() == 1, "root skipped-action summary lost");
+        TemporarySgf compact_output;
+        TemporarySgf expanded_output;
+        SgfMetadata metadata;
+        metadata.opening[0] = metadata.opening[1] = 2;
+        metadata.statistics = result.statistics;
+        SgfWriter::write(compact_output.path, result, metadata);
+        result = expandTraceForInspection(std::move(result));
+        SgfWriter::write(expanded_output.path, *result.root, metadata);
+        check(readFile(compact_output.path) == readFile(expanded_output.path),
+              "compact SGF must preserve nesting, sibling order, and all metadata");
+    }
+    check(lifetime.expired(), "retaining a completed Solver must not retain its trace");
+    Solver next(game, options);
+    next.adoptPersistentProofs(solver);
+    auto next_result = next.solve();
+    check(next_result.root->trace_id == 1 && next_result.compact_trace->nodes() == 4,
+          "next opening must own a fresh trace store");
+    checkThrows([&] { solver.solve(); }, "completed Solver must still reject a second solve");
+}
+
 } // namespace
 
 int main()
 {
     const std::vector<std::pair<std::string, std::function<void()>>> tests = {
+        {"compact trace fields and block boundaries", testCompactTraceRoundTrip},
+        {"compact trace lifetime, progress, and SGF equivalence", testCompactTraceOwnershipAndExport},
         {"Player OR: Unknown, Win, and skipped", testPlayerOrUnknownWinAndSkipped},
         {"Environment AND: all Win", testEnvironmentAndAllWin},
         {"Environment AND: Loss short-circuit", testEnvironmentAndLossShortCircuit},
